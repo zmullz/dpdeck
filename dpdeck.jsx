@@ -46,6 +46,11 @@ const STATUS = [
 ];
 const DEPTS = [ { k:"camera", label:"Camera" }, { k:"grip", label:"Grip" }, { k:"electric", label:"Electric" } ];
 
+/* at-a-glance color coding for slug + time of day (the lighting-relevant flags) */
+const slugColor=s=>s==="EXT"?c.extC:s==="INT/EXT"?"#C98AA0":c.intC;
+const dnColor=d=>({DAY:"#E6B84C",NIGHT:c.night,DUSK:"#C98AA0",DAWN:"#79C0C7"}[d]||c.t2);
+function Tag({label,color,big}){if(!label)return null;return <span style={{fontFamily:MONO,fontSize:big?12:10.5,fontWeight:700,letterSpacing:"0.04em",color,background:color+"22",border:`1px solid ${color}99`,borderRadius:6,padding:big?"3px 9px":"2px 7px",whiteSpace:"nowrap",lineHeight:1.3}}>{label}</span>;}
+
 /* SUN MATH (SunCalc port, MIT) */
 const PI=Math.PI, rad=PI/180, dayMs=864e5, J1970=2440588, J2000=2451545;
 const toJulian=d=>d.valueOf()/dayMs-0.5+J1970;
@@ -115,6 +120,11 @@ const store={
 };
 const imgCache=new Map();
 async function putImage(dataUrl){const id=uid();imgCache.set(id,dataUrl);await store.set("pb:img:"+id,dataUrl);return id;}
+
+/* lossless full backup/restore (everything under pb:*) for never-lose-data + cross-device */
+function downloadJSON(filename,obj){const blob=new Blob([JSON.stringify(obj)],{type:"application/json"});const u=URL.createObjectURL(blob);const a=document.createElement("a");a.href=u;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1500);}
+async function exportFullBackup(){const keys=await store.list();const data={};for(const k of keys){if(String(k).startsWith("pb:"))data[k]=await store.get(k);}return {dpdeckBackup:1,ts:Date.now(),data};}
+async function importFullBackup(obj){if(!obj||obj.dpdeckBackup!==1||!obj.data)throw new Error("Not a DP Deck backup file.");for(const [k,v] of Object.entries(obj.data)){await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}}
 
 /* ---- utils ------------------------------------------------------- */
 const uid=()=>Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3);
@@ -269,7 +279,7 @@ function extractJSON(raw){
   if(a<0||b<0)throw new Error("Could not read a scene list from the response.");
   return JSON.parse(s.slice(a,b+1));
 }
-function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[]};}
+function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
 
 async function parseScriptText(text,onProgress){
   const lines=text.split("\n");const chunks=[];let cur="";
@@ -414,8 +424,8 @@ function applyProjectFile(p,inc){
     const number=String(isc.number??isc.n??"").trim();if(!number)return;
     const k=numKey(number);const slug=isc.slug||"",set=isc.set||"",dn=isc.dn||isc.dayNight||"",syn=isc.syn||"",pageStart=+(isc.pageStart||isc.pg||0)||0;
     let i=byNum.get(k);
-    if(i==null){scenes.push(emptyScene(number,{slug,set,dayNight:dn,syn,storyIndex:isc.storyIndex??idx,pageStart}));i=scenes.length-1;byNum.set(k,i);}
-    else{const o=scenes[i];scenes[i]={...o,slug:slug||o.slug,set:set||o.set,dayNight:dn||o.dayNight,storyIndex:isc.storyIndex??o.storyIndex,pageStart:pageStart||o.pageStart,syn:o.synEdited?o.syn:(syn||o.syn),status:o.status==="omitted"?"todo":o.status};}
+    if(i==null){scenes.push(emptyScene(number,{slug,set,dayNight:dn,syn,storyIndex:isc.storyIndex??idx,pageStart,scriptText:isc.scriptText}));i=scenes.length-1;byNum.set(k,i);}
+    else{const o=scenes[i];scenes[i]={...o,slug:slug||o.slug,set:set||o.set,dayNight:dn||o.dayNight,storyIndex:isc.storyIndex??o.storyIndex,pageStart:pageStart||o.pageStart,syn:o.synEdited?o.syn:(syn||o.syn),scriptText:isc.scriptText||o.scriptText,status:o.status==="omitted"?"todo":o.status};}
     const s=scenes[i];
     if(Array.isArray(isc.shots)&&isc.shots.length){const have=new Set(s.shots.map(x=>x.text));for(const t of isc.shots){if(t&&!have.has(t)){s.shots.push({id:uid(),text:String(t),done:false});have.add(t);}}}
     if(isc.notes&&!(s.notes||"").includes(isc.notes))s.notes=s.notes?(s.notes+"\n"+isc.notes):isc.notes;
@@ -425,6 +435,7 @@ function applyProjectFile(p,inc){
   let out={...p,meta:{...p.meta,...(inc.meta||{})},scenes,gear};
   if(Array.isArray(inc.days)&&inc.days.length)out.scenes=applySchedule(out.scenes,inc.days);
   if(Array.isArray(inc.locations)&&inc.locations.length)out.locations=applyLocations(out.locations,inc.locations).merged;
+  if(Array.isArray(inc.scenes))out.scenes=linkLocations(out.scenes,inc.scenes,out.locations);
   if(Array.isArray(inc.crew)&&inc.crew.length)out.crew=applyCrew(out.crew,inc.crew).merged;
   if(Array.isArray(inc.contacts)&&inc.contacts.length)out.contacts=applyContacts(out.contacts,inc.contacts).merged;
   if(Array.isArray(inc.look)&&inc.look.length)out.look=uniq([...(out.look||[]),...inc.look]);
@@ -683,6 +694,7 @@ function ScriptPages({scene,bump,onMark}){
       </div>
       {scene.syn&&<p style={{fontFamily:UI,fontSize:13.5,lineHeight:1.55,color:c.t1,margin:0}}>{scene.syn}</p>}
     </div>
+    {scene.scriptText&&<div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}><Label style={{marginBottom:7}}>Script</Label><pre style={{fontFamily:MONO,fontSize:12,lineHeight:1.5,color:c.t1,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{scene.scriptText}</pre></div>}
     {pages===null&&ready&&scene.pageStart>0&&<div style={{color:c.t2,fontFamily:UI,fontSize:13}}>Rendering pages…</div>}
     {pages&&pages.map(p=>(
       <div key={p.n} onClick={()=>onMark(p.n,p.ink,p.url,p.aspect)} style={{position:"relative",borderRadius:10,overflow:"hidden",border:`1px solid ${c.line2}`,cursor:"pointer",aspectRatio:String(p.aspect||0.72)}}>
@@ -736,6 +748,8 @@ function SceneView({scene,meta,locations,gearList,wide,patchScene,openInk,openLi
     <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:"12px 15px"}}>
       <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{fontFamily:MONO,fontSize:25,fontWeight:700,color:c.accent,letterSpacing:"-0.5px"}}>{scene.number||"—"}</span>{scene.status==="omitted"&&<Chip color={c.t2}>not in current draft</Chip>}</div>
+        {scene.slug&&<Tag label={scene.slug} color={slugColor(scene.slug)} big/>}
+        {scene.dayNight&&<Tag label={scene.dayNight} color={dnColor(scene.dayNight)} big/>}
         <div style={{width:1,height:26,background:c.line2}}/>
         <StatusPill status={scene.status==="omitted"?"todo":scene.status} onCycle={cycle}/>
         {scene.storyDay&&<span><Label style={{display:"inline"}}>Story day </Label><Val size={13}>{scene.storyDay}</Val></span>}
@@ -887,9 +901,9 @@ function SceneRow({s,locName,onClick}){
     <span style={{width:8,height:8,borderRadius:"50%",background:st.color,flexShrink:0}} title={st.label}/>
     <span style={{flex:1,minWidth:0}}>
       <span style={{display:"flex",alignItems:"center",gap:7}}>
-        {s.slug&&<span style={{fontFamily:MONO,fontSize:10.5,color:s.slug==="EXT"?c.extC:c.intC}}>{s.slug}</span>}
+        {s.slug&&<Tag label={s.slug} color={slugColor(s.slug)}/>}
         <span style={{fontFamily:UI,fontSize:14,fontWeight:600,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.set||"Untitled"}</span>
-        {s.dayNight&&<span style={{fontFamily:MONO,fontSize:9.5,color:c.t2}}>{s.dayNight}</span>}
+        {s.dayNight&&<Tag label={s.dayNight} color={dnColor(s.dayNight)}/>}
       </span>
       <span style={{display:"flex",gap:9,marginTop:2,alignItems:"center"}}>
         {locName&&<span style={{fontFamily:UI,fontSize:11,color:c.t2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}><MapPin size={9} style={{verticalAlign:"-1px"}}/> {locName}</span>}
@@ -902,26 +916,36 @@ function SceneRow({s,locName,onClick}){
   </button>;
 }
 function Library({project,lens,onOpen}){
-  const [q,setQ]=useState(""),[group,setGroup]=useState(""),[showOmit,setShowOmit]=useState(false);
+  const [q,setQ]=useState(""),[group,setGroup]=useState(""),[showOmit,setShowOmit]=useState(false),[filt,setFilt]=useState([]);
   const locName=id=>project.locations.find(l=>l.id===id)?.name;
   let list=project.scenes.filter(s=>showOmit||s.status!=="omitted");
   if(q.trim()){const k=q.toLowerCase();list=list.filter(s=>(s.number+" "+s.set+" "+s.slug+" "+s.dayNight+" "+(s.syn||"")+" "+(s.notes||"")).toLowerCase().includes(k));}
-  list=[...list].sort((a,b)=>cmpScene(a,b,lens));
+  const fSlugs=filt.filter(x=>x==="INT"||x==="EXT"),fTimes=filt.filter(x=>x==="DAY"||x==="NIGHT");
+  if(fSlugs.length)list=list.filter(s=>fSlugs.some(x=>(s.slug||"").includes(x)));
+  if(fTimes.length)list=list.filter(s=>fTimes.includes(s.dayNight));
+  const byDay=(a,b)=>{const aH=!!a.shootDay,bH=!!b.shootDay;if(aH!==bH)return aH?-1:1;const an=parseInt(a.shootDay,10),bn=parseInt(b.shootDay,10),aN=!isNaN(an),bN=!isNaN(bn);if(aN!==bN)return aN?-1:1;if(aN&&bN&&an!==bn)return an-bn;if(!aN&&a.shootDay!==b.shootDay)return String(a.shootDay).localeCompare(String(b.shootDay));return (a.shootOrder||999)-(b.shootOrder||999);};
+  list=[...list].sort(group==="day"?byDay:(a,b)=>cmpScene(a,b,lens));
   let groups;
   if(group==="location")groups=groupBy(list,s=>locName(s.locationId)||"No location set");
-  else if(group==="day")groups=groupBy(list,s=>s.shootDay?`Day ${s.shootDay}${s.shootDate?" · "+s.shootDate:""}`:"Unscheduled");
+  else if(group==="day")groups=groupBy(list,s=>!s.shootDay?"Unscheduled":(isNaN(parseInt(s.shootDay,10))?s.shootDay:`Day ${s.shootDay}${s.shootDate?" · "+s.shootDate:""}`));
   else if(group==="status")groups=groupBy(list,s=>(STATUS.find(x=>x.k===s.status)||STATUS[0]).label);
   else groups=[["",list]];
   const total=project.scenes.filter(s=>s.status!=="omitted").length;
   const omitN=project.scenes.filter(s=>s.status==="omitted").length;
   return <div>
-    <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:13,flexWrap:"wrap"}}>
+    <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:11,flexWrap:"wrap"}}>
       <div style={{position:"relative",flex:1,minWidth:200}}><Search size={16} color={c.t2} style={{position:"absolute",left:11,top:13}}/><TextInput value={q} placeholder={`Search ${total} scenes…`} onChange={e=>setQ(e.target.value)} style={{paddingLeft:34}}/></div>
     </div>
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:14,flexWrap:"wrap"}}>
+    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:9,flexWrap:"wrap"}}>
       <Label>Group</Label>
-      <Segmented value={group} onChange={setGroup} options={[{k:"",label:"None"},{k:"day",label:"Shoot day"},{k:"location",label:"Location"},{k:"status",label:"Status"}]}/>
+      <Segmented value={group} onChange={setGroup} options={[{k:"",label:"Story order"},{k:"day",label:"Shoot day"},{k:"location",label:"Location"},{k:"status",label:"Status"}]}/>
       {omitN>0&&<button onClick={()=>setShowOmit(v=>!v)} style={{marginLeft:"auto",fontFamily:UI,fontSize:12,color:showOmit?c.accent:c.t2,background:"none",border:"none",cursor:"pointer"}}>{showOmit?"Hide":"Show"} {omitN} cut</button>}
+    </div>
+    <div style={{display:"flex",gap:7,alignItems:"center",marginBottom:14,flexWrap:"wrap"}}>
+      <Label>Filter</Label>
+      {["INT","EXT","DAY","NIGHT"].map(t=>{const on=filt.includes(t);const col=(t==="INT"||t==="EXT")?slugColor(t):dnColor(t);return <button key={t} onClick={()=>setFilt(f=>f.includes(t)?f.filter(x=>x!==t):[...f,t])} style={{fontFamily:MONO,fontSize:11,fontWeight:700,letterSpacing:"0.04em",padding:"6px 12px",borderRadius:7,cursor:"pointer",minHeight:34,color:on?"#17120a":col,background:on?col:col+"18",border:`1px solid ${col}${on?"":"66"}`}}>{t}</button>;})}
+      {filt.length>0&&<span style={{fontFamily:MONO,fontSize:11,color:c.t2}}>{list.length} match</span>}
+      {filt.length>0&&<button onClick={()=>setFilt([])} style={{fontFamily:UI,fontSize:12,color:c.t2,background:"none",border:"none",cursor:"pointer"}}>clear</button>}
     </div>
     {list.length===0?<Empty icon={Film} title="No scenes yet" body="Import the script in the Import tab and your scenes will appear here, ready to prep."/>:
       groups.map(([g,items])=><div key={g||"all"} style={{marginBottom:g?18:0}}>
@@ -1127,7 +1151,7 @@ function nextDateForLoc(scenes,locId){const ds=scenes.filter(s=>s.locationId===l
 function LocationEditor({open,init,tz,date,onClose,onSave,onDelete}){
   const [f,set,setF]=useForm(init,open);
   const useHere=async()=>{try{const {lat,lng}=await whereAmI();setF(p=>({...p,lat:lat.toFixed(6),lng:lng.toFixed(6)}));}catch{}};
-  const addToList=async(field,files)=>{const ids=[];for(const file of [...files]){if(!file.type.startsWith("image/"))continue;try{ids.push(await putImage(await downscale(file)));}catch{}}if(ids.length)setF(p=>({...p,[field]:[...(p[field]||[]),...ids]}));};
+  const addToList=async(field,files)=>{const ids=[];let gps=null;for(const file of [...files]){if(!file.type.startsWith("image/"))continue;if(field==="images"&&!gps){try{gps=await readExifGPS(file);}catch{}}try{ids.push(await putImage(await downscale(file)));}catch{}}if(ids.length||gps)setF(p=>{const next={...p,[field]:[...(p[field]||[]),...ids]};if(field==="images"&&gps&&!String(p.lat||"").trim()&&!String(p.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;});};
   const dropList=field=>async e=>{e.preventDefault();e.stopPropagation();const files=[...(e.dataTransfer.files||[])].filter(x=>x.type.startsWith("image/"));if(files.length)return addToList(field,files);let url=(e.dataTransfer.getData("text/uri-list")||"").split("\n").find(l=>l&&!l.startsWith("#"))||"";if(!url){const h=e.dataTransfer.getData("text/html")||"";const m=h.match(/<img[^>]+src=["']([^"']+)["']/i);if(m)url=m[1];}url=(url||"").trim();if(isImgUrl(url))setF(p=>({...p,[field]:[...(p[field]||[]),url]}));};
   const removeFrom=(field,v)=>setF(p=>({...p,[field]:(p[field]||[]).filter(x=>x!==v)}));
   const Strip=({field,label,hint})=><div style={{gridColumn:"1/3"}}>
@@ -1615,7 +1639,11 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
       <Segmented value={m.theme||"dark"} onChange={v=>{const t=v||"dark";set("theme",t);onThemeChange(t);}} options={[{k:"dark",label:"Dark (set)"},{k:"light",label:"Light (day)"}]}/>
     </Card>
     <Card title="Data" icon={Settings}>
-      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:12}}>{HAS?"Your deck is saved locally in this browser (IndexedDB) on this device.":"Heads up: persistent storage isn't available here, so this session won't be saved."}</div>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:12}}>{HAS?"Your deck is saved locally in this browser (IndexedDB), set to persistent so the browser will not evict it. Download a full backup to guard against loss and to move the whole deck to another device (restore it there).":"Heads up: persistent storage isn't available here, so this session won't be saved."}</div>
+      <div style={{display:"flex",gap:9,flexWrap:"wrap",marginBottom:14}}>
+        <Btn kind="ghost" size={12} onClick={async()=>{try{onToast("Building backup…");const b=await exportFullBackup();downloadJSON(`dpdeck-backup-${todayISO()}.json`,b);onToast("Backup downloaded");}catch(e){onToast("Backup failed: "+(e.message||""));}}}><CloudDownload size={15}/>Download full backup</Btn>
+        <label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={15}/>Restore backup</Btn><input type="file" accept="application/json,.json" style={{display:"none"}} onChange={async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;try{await importFullBackup(JSON.parse(await f.text()));onToast("Backup restored. Reloading…");setTimeout(()=>location.reload(),700);}catch(err){onToast("Restore failed: "+(err.message||""));}}}/></label>
+      </div>
       {!wipe?<Btn kind="danger" size={12} onClick={()=>setWipe(true)}><Trash2 size={15}/>Erase everything</Btn>:
         <div style={{display:"flex",gap:9,alignItems:"center"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger}}>Erase all scenes, prep, and media?</span><Btn kind="danger" size={12} onClick={async()=>{for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname"])await store.del(k);location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
     </Card>
@@ -1654,6 +1682,7 @@ function ExportDoc({project}){
   const sec={fontFamily:SERIF,fontSize:20,fontWeight:700,color:P.text,borderBottom:`2px solid ${P.text}`,paddingBottom:6,margin:"0 0 14px"};
   const sub={fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700};
   const imgRow=(arr,h)=>arr&&arr.length?<div style={{display:"flex",flexWrap:"wrap",gap:7,marginTop:8}}>{arr.map((v,i)=><StoredImg key={i} id={v} style={{height:h||150,maxWidth:"32%",objectFit:"cover",border:`1px solid ${P.line}`,borderRadius:4,background:P.soft}}/>)}</div>:null;
+  const gearOf=s=>(s.gearTags||[]).map(id=>project.gear.find(g=>g.id===id)).filter(Boolean);
   return <div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>
     <div className="pd-cover" style={{marginBottom:30}}>
       <div style={{...sub,marginBottom:14}}>Cinematography package</div>
@@ -1686,8 +1715,10 @@ function ExportDoc({project}){
         </div>
         {l&&<div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:3}}>Location: {l.name}</div>}
         {s.syn&&<div style={{fontFamily:SERIF,fontSize:13.5,lineHeight:1.5,marginTop:8}}>{s.syn}</div>}
+        {s.scriptText&&<div style={{marginTop:8}}><span style={sub}>Script</span><pre style={{fontFamily:MONO,fontSize:10,lineHeight:1.4,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:"3px 0 0",color:P.text}}>{s.scriptText}</pre></div>}
         {s.notes&&<div style={{marginTop:8}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12.5,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
         {s.shots.length>0&&<div style={{marginTop:8}}><span style={sub}>Shot list</span><div style={{marginTop:4}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12.5,lineHeight:1.55,display:"flex",gap:8}}><span style={{color:P.muted,fontFamily:MONO,fontSize:11,minWidth:34}}>{sh.done?"[x]":"[ ]"}</span><span>{i+1}. {sh.text}</span></div>)}</div></div>}
+        {(()=>{const g=gearOf(s);return g.length?<div style={{marginTop:8}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const items=g.filter(x=>x.dept===d.k);return items.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {items.map(x=>x.name).join(", ")}</div>:null;})}</div></div>:null;})()}
         {imgRow(s.refs,150)}
         {s.sketches.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:7,marginTop:8}}>{s.sketches.map(id=><SketchThumb key={id} id={id} style={{width:200,aspectRatio:"4/3",border:`1px solid ${P.line}`,borderRadius:4,background:P.soft}}/>)}</div>}
       </div>;})}
@@ -1717,6 +1748,30 @@ function ExportDoc({project}){
         {project.contacts.map(ct=><div key={ct.id} style={{fontFamily:UI,fontSize:12.5,lineHeight:1.6,marginTop:2}}>{ct.name}{ct.role?`, ${ct.role}`:""}{ct.phone?` · ${ct.phone}`:""}{ct.email?` · ${ct.email}`:""}</div>)}
       </div>}
     </div>}
+  </div>;
+}
+
+/* GEAR PULL — specialty gear by department, with the scenes each is needed on */
+function GearSheet({project,depts}){
+  const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00"};
+  const sec={fontFamily:SERIF,fontSize:18,fontWeight:700,color:P.text,borderBottom:`2px solid ${P.text}`,paddingBottom:5,margin:"0 0 10px"};
+  const usedBy=id=>project.scenes.filter(s=>s.status!=="omitted"&&(s.gearTags||[]).includes(id)).sort((a,b)=>cmpNum(a.number,b.number)).map(s=>s.number);
+  return <div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>
+    <div style={{marginBottom:24}}>
+      <div style={{fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700,marginBottom:8}}>Specialty gear pull</div>
+      <div style={{fontFamily:SERIF,fontSize:32,fontWeight:700,lineHeight:1.1}}>{project.meta.title||"Untitled Film"}</div>
+      <div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:4}}>{DEPTS.filter(d=>depts.includes(d.k)).map(d=>d.label).join(" + ")||"No department selected"} · Generated {new Date().toLocaleDateString(undefined,{year:"numeric",month:"long",day:"numeric"})}</div>
+    </div>
+    {DEPTS.filter(d=>depts.includes(d.k)).map(d=>{const items=project.gear.filter(g=>g.dept===d.k);return <div key={d.k} className="pd-section" style={{marginBottom:22}}>
+      <div style={sec}>{d.label}</div>
+      {items.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>None on this department.</div>:
+        <table style={{width:"100%",borderCollapse:"collapse"}}><tbody>
+          {items.map(g=>{const ns=usedBy(g.id);return <tr key={g.id} className="pd-row" style={{borderBottom:`1px solid ${P.line}`}}>
+            <td style={{padding:"7px 8px",fontFamily:UI,fontSize:13.5,fontWeight:600,verticalAlign:"top",width:"38%"}}>{g.name}</td>
+            <td style={{padding:"7px 8px",fontFamily:MONO,fontSize:11,color:P.muted,verticalAlign:"top"}}>{ns.length?`${ns.length} scene${ns.length>1?"s":""}: ${ns.join(", ")}`:"unassigned"}</td>
+          </tr>;})}
+        </tbody></table>}
+    </div>;})}
   </div>;
 }
 
@@ -1802,10 +1857,12 @@ export default function App(){
   const [info,setInfo]=useState(null);
   const [more,setMore]=useState(false);
   const [jump,setJump]=useState(false);
+  const [exp,setExp]=useState({mode:"full",depts:["camera","grip","electric"]});
   const wide=useWide();
   const loaded=useRef(false);
 
   useEffect(()=>{(async()=>{
+    try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
     let p=await store.get("pb:project");
     if(!p||typeof p!=="object"){p=DEFAULT_PROJECT();}
     p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};p.scenes=(p.scenes||[]).map(s=>({...emptyScene(s.number),...s}));p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];
@@ -1875,11 +1932,13 @@ export default function App(){
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
         {view==="contacts"&&<Contacts project={project} setProject={setProject}/>}
         {view==="export"&&<div>
-          <div data-noprint style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+          <div data-noprint style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
+            <div style={{width:270}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"}]}/></div>
+            {exp.mode==="gear"&&<div style={{display:"flex",gap:6}}>{DEPTS.map(d=>{const on=exp.depts.includes(d.k);return <button key={d.k} onClick={()=>setExp(e=>({...e,depts:on?e.depts.filter(x=>x!==d.k):[...e.depts,d.k]}))} style={{padding:"8px 12px",borderRadius:8,border:`1px solid ${on?c.accent:c.line2}`,background:on?c.accentSoft:c.bg2,color:on?c.accent:c.t1,fontFamily:UI,fontSize:13,fontWeight:650,cursor:"pointer"}}>{d.label}</button>;})}</div>}
             <Btn kind="primary" size={13} onClick={()=>window.print()}><Printer size={16}/>Print / Save as PDF</Btn>
-            <span style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:560}}>Opens your device's print dialog. Pick "Save as PDF" to get a file to share. Script, notes, shot lists, reference frames, blocking, location photos, and floor plans are all included. Scroll through once first so images load.</span>
           </div>
-          <ExportDoc project={project}/>
+          <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:620,marginBottom:14}}>{exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then Print and Save as PDF.":"Gear pull: specialty gear by department, each with the scenes it is needed on. Toggle Camera / Grip / Electric above."}</div>
+          {exp.mode==="full"?<ExportDoc project={project}/>:<GearSheet project={project} depts={exp.depts}/>}
         </div>}
         {view==="import"&&<Import project={project} setProject={setProject} onToast={toastFn}/>}
         {view==="settings"&&<SettingsView project={project} setProject={setProject} onToast={toastFn} onThemeChange={themeChange}/>}

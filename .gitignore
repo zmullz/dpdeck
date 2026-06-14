@@ -7,10 +7,11 @@ dist
 
 # Film data and anything film-identifying NEVER goes to the repo (private).
 # The data lives only in Dropbox + each device's IndexedDB.
-painted-bride-import.json
-public/painted-bride-import.json
+*-import.json
+public/*-import.json
 _source/
 tools/
 README.md
+SETUP.md
 dpdeck-import-SKILL.md
 .claude/
