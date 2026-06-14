@@ -1,0 +1,16 @@
+# deps / build
+node_modules
+dist
+.vite
+.DS_Store
+*.local
+
+# Film data and anything film-identifying NEVER goes to the repo (private).
+# The data lives only in Dropbox + each device's IndexedDB.
+painted-bride-import.json
+public/painted-bride-import.json
+_source/
+tools/
+README.md
+dpdeck-import-SKILL.md
+.claude/
