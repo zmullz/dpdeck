@@ -321,10 +321,35 @@ function Modal({open,onClose,title,children,footer,wide}){
     </div>
   </div>;
 }
+// Location photos can be stored as "r2:<key>" refs (thumbnail at <key>_t.jpg, full at <key>.jpg on
+// R2) so the synced deck stays tiny no matter how many photos there are. The thumbnail is fetched
+// authed once and cached as a data URL in IndexedDB (pb:imgcache:*, device-local, NOT in the deck)
+// so it works offline after the first view.
+const isR2Ref=s=>typeof s==="string"&&s.startsWith("r2:");
+const r2ThumbMem=new Map();
+async function r2ThumbDataURL(ref){
+  if(!isR2Ref(ref))return null;
+  if(r2ThumbMem.has(ref))return r2ThumbMem.get(ref);
+  const key=ref.slice(3)+"_t.jpg";
+  try{const cached=await store.get("pb:imgcache:"+key);if(cached){r2ThumbMem.set(ref,cached);return cached;}}catch{}
+  try{
+    const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});
+    if(!res.ok)throw new Error("thumb "+res.status);
+    const blob=await res.blob();
+    const dataUrl=await new Promise((rs,rj)=>{const fr=new FileReader();fr.onload=()=>rs(fr.result);fr.onerror=rj;fr.readAsDataURL(blob);});
+    r2ThumbMem.set(ref,dataUrl);try{await store.set("pb:imgcache:"+key,dataUrl);}catch{}
+    return dataUrl;
+  }catch{return null;}
+}
 function StoredImg({id,style,onClick}){
-  const url=isImgUrl(id);
-  const [src,setSrc]=useState(url?id:(imgCache.get(id)||null));
-  useEffect(()=>{let on=true;if(isImgUrl(id)){setSrc(id);return;}if(imgCache.has(id)){setSrc(imgCache.get(id));return;}store.get("pb:img:"+id).then(v=>{if(on&&v){imgCache.set(id,v);setSrc(v);}});return()=>{on=false;};},[id]);
+  const [src,setSrc]=useState(isImgUrl(id)?id:(isR2Ref(id)?null:(imgCache.get(id)||null)));
+  useEffect(()=>{let on=true;
+    if(isImgUrl(id)){setSrc(id);return;}
+    if(isR2Ref(id)){setSrc(null);r2ThumbDataURL(id).then(d=>{if(on)setSrc(d);});return()=>{on=false;};}
+    if(imgCache.has(id)){setSrc(imgCache.get(id));return;}
+    store.get("pb:img:"+id).then(v=>{if(on&&v){imgCache.set(id,v);setSrc(v);}});
+    return()=>{on=false;};
+  },[id]);
   if(!src)return <div style={{...style,background:c.bg2,display:"grid",placeItems:"center"}}><ImageIcon size={16} color={c.t2}/></div>;
   return <img src={src} onClick={onClick} style={style} alt=""/>;
 }
@@ -363,7 +388,9 @@ const fullUrlCache=new Map();
 async function fullImageURL(id){
   if(typeof id!=="string"||isImgUrl(id))return null;
   if(fullUrlCache.has(id))return fullUrlCache.get(id);
-  let key=null;try{key=await store.get("pb:imgfull:"+id);}catch{}
+  let key=null;
+  if(isR2Ref(id))key=id.slice(3)+".jpg";
+  else{try{key=await store.get("pb:imgfull:"+id);}catch{}}
   if(!key){fullUrlCache.set(id,null);return null;}
   try{const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(!res.ok)throw new Error("full "+res.status);const u=URL.createObjectURL(await res.blob());fullUrlCache.set(id,u);return u;}catch{return null;}
 }
