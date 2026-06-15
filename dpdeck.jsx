@@ -2317,20 +2317,23 @@ export default function App(){
     try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
     loadAIKey();await loadR2Key();
     const keyed=!!R2_KEY;setHasKey(keyed);
-    // Auto-pull on open: if the cloud deck is newer than anything this device has synced and
-    // newer than its local edits, bring it down first — so a new device needs no manual import.
+    const localSynced0=(await store.get("pb:synced_ts"))||0,localMtime0=(await store.get("pb:project_mtime"))||0;
+    const hasLocalEdits=localMtime0>localSynced0; // unsynced local work — a pull must NEVER clobber it
+    // Auto-pull on open ONLY when this device has no unsynced edits; otherwise we would revert the user's work.
     if(keyed){try{
       setSync({state:"syncing",at:Date.now()});
       const meta=await remoteDeckMeta();
-      const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
-      if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>localMtime){pulling.current=true;await pullDeckFromCloud();pulling.current=false;}
+      if(meta&&meta.ts&&meta.ts>localSynced0&&!hasLocalEdits){pulling.current=true;await pullDeckFromCloud();pulling.current=false;}
       setSync({state:"synced",at:Date.now()});
     }catch{pulling.current=false;setSync({state:"error",at:Date.now()});}}
     let p=normalizeProject(await store.get("pb:project"));
     applyTheme(p.meta.theme);setProject(p);
     setView(p.scenes.length?"home":"import");
     restoreScriptPDF().then(()=>setTb(b=>b+1));
-    setTimeout(()=>{loaded.current=true;},60);
+    setTimeout(()=>{loaded.current=true;
+      // Push stranded local edits from a previous session right away so they reach the cloud.
+      if(hasLocalEdits&&R2_KEY&&!pulling.current){dirty.current=true;pushDeckToCloud().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
+    },60);
   })();},[]);
 
   // Auto-push: debounced cloud sync after local edits (only when a worker key is set).
@@ -2355,7 +2358,7 @@ export default function App(){
       try{
         const meta=await remoteDeckMeta();
         const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
-        if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>localMtime&&!dirty.current){
+        if(meta&&meta.ts&&meta.ts>localSynced&&localMtime<=localSynced&&!dirty.current){
           pulling.current=true;setSync({state:"syncing",at:Date.now()});
           await pullDeckFromCloud();
           skipPush.current=true;setProject(normalizeProject(await store.get("pb:project")));setTb(b=>b+1);
@@ -2367,8 +2370,9 @@ export default function App(){
       if(document.visibilityState==="visible")checkPull();
       else if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);pushDeckToCloud().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
     };
-    window.addEventListener("focus",checkPull);document.addEventListener("visibilitychange",onVis);
-    return()=>{window.removeEventListener("focus",checkPull);document.removeEventListener("visibilitychange",onVis);};
+    const onHide=()=>{if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);pushDeckToCloud().catch(()=>{});}};
+    window.addEventListener("focus",checkPull);document.addEventListener("visibilitychange",onVis);window.addEventListener("pagehide",onHide);
+    return()=>{window.removeEventListener("focus",checkPull);document.removeEventListener("visibilitychange",onVis);window.removeEventListener("pagehide",onHide);};
   },[]);
 
   useEffect(()=>{if(!loaded.current||!project)return;const t=setTimeout(()=>{store.set("pb:project",project);},600);return()=>clearTimeout(t);},[project]);
