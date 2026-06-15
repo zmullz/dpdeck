@@ -123,7 +123,24 @@ async function putImage(dataUrl){const id=uid();imgCache.set(id,dataUrl);await s
 
 /* lossless full backup/restore (everything under pb:*) for never-lose-data + cross-device */
 function downloadJSON(filename,obj){const blob=new Blob([JSON.stringify(obj)],{type:"application/json"});const u=URL.createObjectURL(blob);const a=document.createElement("a");a.href=u;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1500);}
-async function exportFullBackup(){const keys=await store.list();const data={};for(const k of keys){if(String(k).startsWith("pb:"))data[k]=await store.get(k);}return {dpdeckBackup:1,ts:Date.now(),data};}
+async function exportFullBackup(){
+  // Selective: only what the project references. Excludes device-local secrets (pb:aikey,
+  // pb:r2key) and orphaned images so backups/sync stay lean and never leak keys.
+  const p=await store.get("pb:project")||{};
+  const data={"pb:project":p};
+  const imgIds=new Set();
+  const addRefs=arr=>{for(const r of arr||[])if(typeof r==="string"&&!isImgUrl(r))imgIds.add(r);};
+  for(const s of p.scenes||[])addRefs(s.refs);
+  addRefs(p.look);
+  for(const l of p.locations||[]){addRefs(l.images);addRefs(l.plans);if(l.imgId&&!isImgUrl(l.imgId))imgIds.add(l.imgId);}
+  const sketchIds=new Set();
+  for(const s of p.scenes||[])for(const id of s.sketches||[])sketchIds.add(id);
+  for(const id of sketchIds){const sk=await store.get("pb:sketch:"+id);if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId))imgIds.add(sk.bgImgId);}}
+  for(const id of imgIds){const v=await store.get("pb:img:"+id);if(v)data["pb:img:"+id]=v;}
+  for(const k of (await store.list())){if(String(k).startsWith("pb:scriptink:"))data[k]=await store.get(k);}
+  const pdf=await store.get("pb:scriptpdf");if(pdf){data["pb:scriptpdf"]=pdf;const n=await store.get("pb:scriptpdfname");if(n)data["pb:scriptpdfname"]=n;}
+  return {dpdeckBackup:1,ts:Date.now(),data};
+}
 async function importFullBackup(obj){if(!obj||obj.dpdeckBackup!==1||!obj.data)throw new Error("Not a DP Deck backup file.");for(const [k,v] of Object.entries(obj.data)){await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}}
 
 /* ---- utils ------------------------------------------------------- */
@@ -257,16 +274,28 @@ const MODEL="claude-opus-4-8"; // in-artifact model for parsing + image filing
 
 /* CLOUD BRIDGE (R2 worker) — Claude parses in chat + pushes JSON here; app pulls it */
 const R2_BASE="https://files-worker.me-e51.workers.dev";
-const R2_READ_KEY=""; // empty = rely on public GET for dpdeck/ ; else set a read-only key
+/* The Files Worker already does CORS + OPTIONS + authed read/write. The app sends the
+   user's key (entered once per device in Settings, stored locally, never in the repo), so
+   cloud pull/push works privately without making the film publicly readable. */
+let R2_KEY="";
+async function loadR2Key(){try{R2_KEY=(await store.get("pb:r2key"))||"";}catch{R2_KEY="";}}
+function setR2Key(k){R2_KEY=(k||"").trim();return store.set("pb:r2key",R2_KEY);}
+const r2Headers=()=>R2_KEY?{"X-API-Key":R2_KEY}:undefined;
 const R2_KEYS={script:"dpdeck/script.json",schedule:"dpdeck/schedule.json",locations:"dpdeck/locations.json",crew:"dpdeck/crew.json",contacts:"dpdeck/contacts.json"};
+const DECK_KEY="dpdeck/_deck.json"; // full lossless deck snapshot for cross-device sync
 async function r2Read(name){
   const key=R2_KEYS[name];if(!key)return null;
-  const res=await fetch(R2_BASE+"/read/"+key,R2_READ_KEY?{headers:{"X-API-Key":R2_READ_KEY}}:undefined);
+  const res=await fetch(R2_BASE+"/read/"+key,{headers:r2Headers()});
   if(res.status===404)return null;
+  if(res.status===401)throw new Error("cloud 401 (add your Files Worker key in Settings)");
   if(!res.ok)throw new Error("cloud "+res.status);
   const t=(await res.text()).trim();
   return t||null;
 }
+async function r2ReadRaw(key){const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(res.status===404)return null;if(!res.ok)throw new Error("cloud "+res.status);return await res.text();}
+async function r2Write(key,text){const res=await fetch(R2_BASE+"/write/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"PUT",headers:{...(r2Headers()||{}),"Content-Type":"application/json"},body:text});if(!res.ok)throw new Error("cloud write "+res.status);return true;}
+async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();await r2Write(DECK_KEY,JSON.stringify(b));return JSON.stringify(b).length;}
+async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");await importFullBackup(JSON.parse(t));return true;}
 /* in-app AI: uses the user's OWN Anthropic key, stored locally (pb:aikey) on this device,
    called direct from the browser. No key in code, no server. Empty key = AI buttons stay off;
    the paste-JSON and Load Project paths never need it. */
@@ -1632,7 +1661,8 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
   const m=project.meta;const set=(k,v)=>setProject(p=>({...p,meta:{...p.meta,[k]:v}}));
   const [wipe,setWipe]=useState(false);
   const [aikey,setAikey]=useState("");
-  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));},[]);
+  const [r2key,setR2k]=useState(""),[syncing,setSyncing]=useState("");
+  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));store.get("pb:r2key").then(k=>setR2k(k||""));},[]);
   const useHere=async()=>{try{const {lat,lng}=await whereAmI();setProject(p=>({...p,meta:{...p.meta,baseLat:lat.toFixed(6),baseLng:lng.toFixed(6)}}));onToast("Base set to current location");}catch{onToast("Couldn't get location");}};
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     <Card title="Film" icon={Film}>
@@ -1654,6 +1684,17 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
       <div style={{display:"flex",gap:8,alignItems:"center"}}>
         <TextInput type="password" value={aikey} placeholder="sk-ant-..." autoComplete="off" onChange={e=>setAikey(e.target.value)}/>
         <Btn kind="primary" size={12} onClick={async()=>{await setAIKey(aikey.trim());onToast(aikey.trim()?"AI key saved on this device":"AI key cleared");}}>Save</Btn>
+      </div>
+    </Card>
+    <Card title="Cloud sync (optional)" icon={CloudDownload}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>Sync the whole deck across devices through your R2 Files Worker. Enter the worker key (stored only on this device, never in the app code). Push from one device, Pull on another. The film stays private: the worker requires this key, nothing is made public.</div>
+      <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:11}}>
+        <TextInput type="password" value={r2key} placeholder="Files Worker X-API-Key" autoComplete="off" onChange={e=>setR2k(e.target.value)}/>
+        <Btn kind="ghost" size={12} onClick={async()=>{await setR2Key(r2key.trim());onToast(r2key.trim()?"Cloud key saved on this device":"Cloud key cleared");}}>Save</Btn>
+      </div>
+      <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
+        <Btn kind="ghost" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("push");try{const n=await pushDeckToCloud();onToast(`Pushed deck to cloud (${(n/1048576).toFixed(1)} MB)`);}catch(e){onToast("Push failed: "+(e.message||""));}setSyncing("");}}><Upload size={15}/>{syncing==="push"?"Pushing…":"Push deck to cloud"}</Btn>
+        <Btn kind="ghost" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("pull");try{await pullDeckFromCloud();onToast("Pulled deck from cloud. Reloading…");setTimeout(()=>location.reload(),800);}catch(e){onToast("Pull failed: "+(e.message||""));setSyncing("");}}}><CloudDownload size={15}/>{syncing==="pull"?"Pulling…":"Pull deck from cloud"}</Btn>
       </div>
     </Card>
     <Card title="Data" icon={Settings}>
@@ -1881,7 +1922,7 @@ export default function App(){
 
   useEffect(()=>{(async()=>{
     try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
-    loadAIKey();
+    loadAIKey();loadR2Key();
     let p=await store.get("pb:project");
     if(!p||typeof p!=="object"){p=DEFAULT_PROJECT();}
     p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};p.scenes=(p.scenes||[]).map(s=>({...emptyScene(s.number),...s}));p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];
