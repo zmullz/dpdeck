@@ -89,6 +89,12 @@ function sunAboveWindow(date,lat,lng,deg){
   const Js=setJ(h,lw,phi,d,n,M,L);if(isNaN(Js))return null;
   return {start:fromJulian(Jn-(Js-Jn)),end:fromJulian(Js)};
 }
+// ShadeMap deep link: exact 3D shadows for this location at solar noon on the shoot date.
+// URL format read from shademap.app's live bundle: /@lat,lng,Zz,MILLISt,0b,0p,0m (t = epoch ms).
+function shadeMapUrl(lat,lng,ymd){
+  if(!lat||!lng||!ymd)return null;
+  try{const noon=sunTimes(dayNoonUTC(ymd),+lat,+lng).noon;const ms=(noon&&!isNaN(noon))?noon.getTime():dayNoonUTC(ymd).getTime();return `https://shademap.app/@${lat},${lng},16z,${ms}t,0b,0p,0m`;}catch{return null;}
+}
 function tzOff(date,tz){try{const p=new Intl.DateTimeFormat("en-US",{timeZone:tz,hour12:false,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}).formatToParts(date).reduce((a,x)=>((a[x.type]=x.value),a),{});const u=Date.UTC(p.year,p.month-1,p.day,p.hour==="24"?0:p.hour,p.minute,p.second);return Math.round((u-date.getTime())/6e4);}catch{return 0;}}
 function dayNoonUTC(ymd){const [y,m,d]=ymd.split("-").map(Number);return new Date(Date.UTC(y,m-1,d,12));}
 function localToAbs(ymd,h,mn,tz){const [y,m,d]=ymd.split("-").map(Number);const off=tzOff(new Date(Date.UTC(y,m-1,d,12)),tz);return new Date(Date.UTC(y,m-1,d,h,mn)-off*6e4);}
@@ -1613,6 +1619,7 @@ function LocationCard({loc,meta,tz,date,openLightbox,onOpen}){
   const mapsHref=loc.address?`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address)}`:(lat?`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`:null);
   const appleHref=lat?`https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(name)}`:(loc.address?`https://maps.apple.com/?q=${encodeURIComponent(loc.address)}`:null);
   const earthHref=lat?`https://earth.google.com/web/search/${lat},${lng}`:null;
+  const shadeHref=lat?shadeMapUrl(lat,lng,date):null;
   const shown=gallery.slice(0,12);
   return <div style={{border:`1px solid ${c.line}`,borderRadius:11,overflow:"hidden",background:c.bg1}}>
     <button onClick={onOpen} style={{width:"100%",display:"flex",alignItems:"center",gap:8,padding:"9px 12px",background:"none",border:"none",borderBottom:`1px solid ${c.line}`,cursor:"pointer",textAlign:"left"}}>
@@ -1633,6 +1640,7 @@ function LocationCard({loc,meta,tz,date,openLightbox,onOpen}){
         {mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><MapPin size={13}/>Maps</Btn></a>}
         {appleHref&&<a href={appleHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><MapPin size={13}/>Apple</Btn></a>}
         {earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><Compass size={13}/>Earth</Btn></a>}
+        {shadeHref&&<a href={shadeHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><Sun size={13}/>Shade</Btn></a>}
       </div>
       {lat&&lng&&<div style={{borderTop:`1px solid ${c.line}`,paddingTop:10}}><Label style={{marginBottom:7}}>Sun · {date}</Label><SunPanel lat={lat} lng={lng} tz={tz} date={date}/></div>}
     </div>
@@ -1648,6 +1656,7 @@ function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,open
   const mapsHref=loc.address?`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address)}`:(lat?`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`:null);
   const appleHref=lat?`https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(name)}`:(loc.address?`https://maps.apple.com/?q=${encodeURIComponent(loc.address)}`:null);
   const earthHref=lat?`https://earth.google.com/web/search/${lat},${lng}`:null;
+  const shadeHref=lat?shadeMapUrl(lat,lng,date):null;
   const i=clamp(pi,0,Math.max(0,gallery.length-1));
   const go=d=>setPi(x=>clamp(x+d,0,gallery.length-1));
   const navb=side=>({position:"absolute",[side]:10,top:"50%",transform:"translateY(-50%)",width:38,height:38,borderRadius:"50%",border:"none",background:"#0009",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"});
@@ -1685,6 +1694,7 @@ function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,open
           {mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><MapPin size={14}/>Google Maps</Btn></a>}
           {appleHref&&<a href={appleHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><MapPin size={14}/>Apple Maps</Btn></a>}
           {earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><Compass size={14}/>Google Earth</Btn></a>}
+          {shadeHref&&<a href={shadeHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><Sun size={14}/>ShadeMap shadows</Btn></a>}
         </div>
         {lat&&lng?<div style={sect}><Label style={{marginBottom:8}}>Sun · {date}</Label><SunPanel lat={lat} lng={lng} tz={tz} date={date}/></div>
           :<div style={{...sect,fontFamily:UI,fontSize:13,color:c.t2}}>No GPS yet. Add a geotagged photo or coordinates (Edit) to get sun and weather here.</div>}
