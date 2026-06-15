@@ -1551,9 +1551,11 @@ function LocationEditor({open,init,tz,date,onClose,onSave,onDelete}){
     </div>}
   </Modal>;
 }
-function Locations({project,setProject,onOpen,openLightbox,onToast}){
+function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFocused}){
   const [ed,setEd]=useState(null);
   const [dropId,setDropId]=useState("");
+  // Deep-link from a scene's location chip: open that exact location's detail, not just the list.
+  useEffect(()=>{if(!focusLoc)return;const l=project.locations.find(x=>x.id===focusLoc);if(l)setEd(l);onFocused&&onFocused();},[focusLoc]);
   const save=l=>setProject(p=>({...p,locations:l.id?p.locations.map(x=>x.id===l.id?l:x):[...p.locations,{...l,id:uid(),images:l.images||[],plans:l.plans||[]}]}));
   const del=id=>setProject(p=>({...p,locations:p.locations.filter(x=>x.id!==id),scenes:p.scenes.map(s=>s.locationId===id?{...s,locationId:""}:s)}));
   const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||""};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
@@ -2307,6 +2309,7 @@ export default function App(){
   const [jump,setJump]=useState(false);
   const [exp,setExp]=useState({mode:"full",depts:["camera","grip","electric"]});
   const [pdfv,setPdfv]=useState(null);
+  const [focusLoc,setFocusLoc]=useState(null);
   const [hasKey,setHasKey]=useState(false);
   const [sync,setSync]=useState({state:"off",at:0}); // off|idle|pending|syncing|synced|error
   const wide=useWide();
@@ -2417,7 +2420,7 @@ export default function App(){
   if(!project)return <div style={{position:"fixed",inset:0,background:c.bg0,display:"grid",placeItems:"center"}}><div style={{fontFamily:MONO,color:c.accent,fontSize:13}}>Loading deck…</div></div>;
 
   const present=project.scenes.filter(s=>s.status!=="omitted").sort((a,b)=>cmpScene(a,b,lens));
-  const openScene=key=>{if(typeof key==="string"&&key.startsWith("__loc__")){setView("locations");return;}setActiveScene(key);setView("scene");};
+  const openScene=key=>{if(typeof key==="string"&&key.startsWith("__loc__")){setFocusLoc(key.slice(7)||null);setView("locations");return;}setActiveScene(key);setView("scene");};
   const curScene=project.scenes.find(s=>s.number===activeScene);
   let neighbors=null;
   if(curScene){const i=present.findIndex(s=>s.number===curScene.number);neighbors={prev:i>0?present[i-1].number:null,next:i>=0&&i<present.length-1?present[i+1].number:null};}
@@ -2496,7 +2499,7 @@ export default function App(){
         {view==="docs"&&<Documents openPdf={openPdf} onToast={toastFn}/>}
         {view==="days"&&<Days project={project} onOpen={openScene}/>}
         {view==="capture"&&<Capture project={project} setProject={setProject} onFiled={()=>{}} onToast={toastFn}/>}
-        {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn}/>}
+        {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn} focusLoc={focusLoc} onFocused={()=>setFocusLoc(null)}/>}
         {view==="crew"&&<Crew project={project} setProject={setProject}/>}
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
         {view==="contacts"&&<Contacts project={project} setProject={setProject}/>}
