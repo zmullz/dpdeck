@@ -550,7 +550,9 @@ const restoreScriptPDF=()=>ensureDoc("script").then(d=>!!d);
 async function getDocPageImage(slot,n){
   const d=docs[slot];if(!d.doc||n<1||n>d.doc.numPages)return null;
   if(d.pageCache.has(n))return d.pageCache.get(n);
-  const r=await pdfRenderPage(d.doc,n,1.7);d.pageCache.set(n,r);return r;
+  const r=await pdfRenderPage(d.doc,n,1.7);
+  if(d.pageCache.size>=24){const oldest=d.pageCache.keys().next().value;d.pageCache.delete(oldest);} // bound rendered-page cache
+  d.pageCache.set(n,r);return r;
 }
 async function getScriptPageImage(n){return getDocPageImage("script",n);}
 
@@ -960,7 +962,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
   );
 
   const Script=<PanelShell wide={wide} title="Script" icon={<FileText size={14} color={c.accent}/>}
-    action={openPdf&&<IconBtn icon={Maximize2} size={17} dim title="Open full script, flip pages" onClick={()=>openPdf({slot:"script",start:scene.pageStart||1,title:`Script · Scene ${scene.number}`})}/>}>
+    action={openPdf&&scriptDoc.doc&&<IconBtn icon={Maximize2} size={17} dim title="Open full script, flip pages" onClick={()=>openPdf({slot:"script",start:scene.pageStart||1,title:`Script · Scene ${scene.number}`})}/>}>
     <ScriptPages scene={scene} bump={bump} onMark={markPage}/>
   </PanelShell>;
 
@@ -1038,7 +1040,7 @@ function ShotList({scene,patchScene}){
   const idxFromY=y=>{const rows=[...(listRef.current?.querySelectorAll("[data-shot]")||[])];for(let i=0;i<rows.length;i++){const r=rows[i].getBoundingClientRect();if(y<r.top+r.height/2)return i;}return rows.length-1;};
   const onHandleDown=i=>e=>{e.preventDefault();e.currentTarget.setPointerCapture?.(e.pointerId);setDrag({from:i,to:i});};
   const onHandleMove=e=>{if(!drag)return;const to=idxFromY(e.clientY);if(to!==drag.to)setDrag(d=>({...d,to}));};
-  const onHandleUp=()=>{if(!drag)return;const {from,to}=drag;setDrag(null);if(from===to||to==null)return;const arr=[...shots];const [m]=arr.splice(from,1);arr.splice(to,0,m);patchScene({shots:arr});};
+  const onHandleUp=()=>{if(!drag)return;const {from,to}=drag;setDrag(null);if(from===to||to==null||to<0)return;const arr=[...shots];const [m]=arr.splice(from,1);arr.splice(to,0,m);patchScene({shots:arr});};
   return <div>
     <Label style={{marginBottom:6}}>Shot list{shots.length?` · ${done}/${shots.length}`:""}</Label>
     {shots.length>0&&<div ref={listRef} style={{display:"flex",flexDirection:"column",gap:6,marginBottom:8}}>
@@ -2166,7 +2168,7 @@ export default function App(){
       setSync({state:"syncing",at:Date.now()});
       const meta=await remoteDeckMeta();
       const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
-      if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>=localMtime){pulling.current=true;await pullDeckFromCloud();pulling.current=false;}
+      if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>localMtime){pulling.current=true;await pullDeckFromCloud();pulling.current=false;}
       setSync({state:"synced",at:Date.now()});
     }catch{pulling.current=false;setSync({state:"error",at:Date.now()});}}
     let p=normalizeProject(await store.get("pb:project"));
