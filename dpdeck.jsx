@@ -1590,11 +1590,75 @@ function LocationEditor({open,init,tz,date,onClose,onSave,onDelete}){
     </div>}
   </Modal>;
 }
+/* Rich, read-first location page: flip-through photos, map links, sun, weather, travel, scenes. */
+function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,openLightbox}){
+  const [pi,setPi]=useState(0);
+  const gallery=(loc.images&&loc.images.length?loc.images:(loc.imgId?[loc.imgId]:[]));
+  const plans=loc.plans||[];
+  const here=scenes.filter(s=>s.locationId===loc.id&&s.status!=="omitted").sort((a,b)=>cmpNum(a.number,b.number));
+  const name=loc.name||"Location", lat=loc.lat, lng=loc.lng;
+  const mapsHref=loc.address?`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address)}`:(lat?`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`:null);
+  const appleHref=lat?`https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(name)}`:(loc.address?`https://maps.apple.com/?q=${encodeURIComponent(loc.address)}`:null);
+  const earthHref=lat?`https://earth.google.com/web/search/${lat},${lng}`:null;
+  const i=clamp(pi,0,Math.max(0,gallery.length-1));
+  const go=d=>setPi(x=>clamp(x+d,0,gallery.length-1));
+  const navb=side=>({position:"absolute",[side]:10,top:"50%",transform:"translateY(-50%)",width:38,height:38,borderRadius:"50%",border:"none",background:"#0009",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"});
+  const sect={borderTop:`1px solid ${c.line}`,paddingTop:14};
+  return <div style={{position:"fixed",inset:0,background:c.bg1,zIndex:90,display:"flex",flexDirection:"column"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
+      <IconBtn icon={ChevronLeft} onClick={onClose} title="Back"/>
+      <MapPin size={16} color={c.accent}/>
+      <div style={{fontFamily:UI,fontWeight:700,fontSize:16,color:c.t0,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
+      <Btn kind="ghost" size={12} onClick={onEdit}><Settings size={14}/>Edit</Btn>
+    </div>
+    <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
+      <div style={{maxWidth:900,margin:"0 auto",padding:16,display:"flex",flexDirection:"column",gap:16}}>
+        {gallery.length>0&&<div>
+          <div style={{position:"relative",borderRadius:12,overflow:"hidden",border:`1px solid ${c.line2}`,background:"#000"}}>
+            <StoredImg id={gallery[i]} onClick={()=>openLightbox&&openLightbox(gallery,i)} style={{width:"100%",maxHeight:"54vh",objectFit:"contain",display:"block",cursor:"zoom-in"}}/>
+            {gallery.length>1&&<>
+              <button onClick={()=>go(-1)} style={{...navb("left"),opacity:i===0?0.4:1}}><ChevronLeft size={22}/></button>
+              <button onClick={()=>go(1)} style={{...navb("right"),opacity:i===gallery.length-1?0.4:1}}><ChevronRight size={22}/></button>
+              <div style={{position:"absolute",bottom:8,left:"50%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:11,color:"#fff",background:"#0009",borderRadius:20,padding:"4px 10px"}}>{i+1} / {gallery.length}</div>
+            </>}
+          </div>
+          {gallery.length>1&&<div style={{display:"flex",gap:6,overflowX:"auto",marginTop:8,paddingBottom:4}}>
+            {gallery.map((g,k)=><div key={k} onClick={()=>setPi(k)} style={{flexShrink:0,cursor:"pointer"}}><StoredImg id={g} style={{width:62,height:62,objectFit:"cover",borderRadius:7,border:`2px solid ${k===i?c.accent:"transparent"}`,display:"block"}}/></div>)}
+          </div>}
+        </div>}
+        <div style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center"}}>
+          {loc.address&&<span style={{fontFamily:UI,fontSize:13,color:c.t1}}><MapPin size={12} style={{verticalAlign:"-2px"}}/> {loc.address}</span>}
+          {here.length>0&&<Chip color={c.t1}><Film size={11}/>{here.length} scene{here.length>1?"s":""}</Chip>}
+          {gallery.length>0&&<Chip color={c.t2}><ImageIcon size={11}/>{gallery.length}</Chip>}
+          {date&&<span style={{fontFamily:MONO,fontSize:11,color:c.t2}}>next shoot {date}</span>}
+          {meta&&lat&&<TravelChip meta={meta} lat={lat} lng={lng}/>}
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:9}}>
+          {mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><MapPin size={14}/>Google Maps</Btn></a>}
+          {appleHref&&<a href={appleHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><MapPin size={14}/>Apple Maps</Btn></a>}
+          {earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={12}><Compass size={14}/>Google Earth</Btn></a>}
+        </div>
+        {lat&&lng?<div style={sect}><Label style={{marginBottom:8}}>Sun · {date}</Label><SunPanel lat={lat} lng={lng} tz={tz} date={date}/></div>
+          :<div style={{...sect,fontFamily:UI,fontSize:13,color:c.t2}}>No GPS yet. Add a geotagged photo or coordinates (Edit) to get sun and weather here.</div>}
+        {lat&&lng&&<div style={sect}><WeatherCard lat={lat} lng={lng} tz={tz} date={date}/></div>}
+        {here.length>0&&<div style={sect}><Label style={{marginBottom:8}}>Scenes here</Label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>{here.map(s=><button key={s.number} onClick={()=>onOpenScene&&onOpenScene(s.number)} style={{display:"flex",flexDirection:"column",gap:2,alignItems:"flex-start",background:c.bg2,border:`1px solid ${c.line2}`,borderRadius:8,padding:"7px 11px",cursor:"pointer",textAlign:"left",maxWidth:240}}>
+            <span style={{fontFamily:MONO,fontSize:11,color:c.accent,fontWeight:700}}>Sc {s.number}{s.dayNight?` · ${s.dayNight}`:""}</span>
+            <span style={{fontFamily:UI,fontSize:12.5,color:c.t1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:218}}>{s.syn||s.set||""}</span>
+          </button>)}</div></div>}
+        {plans.length>0&&<div style={sect}><Label style={{marginBottom:8}}>Floor plans</Label>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{plans.map((p,k)=><StoredImg key={k} id={p} onClick={()=>openLightbox&&openLightbox(plans,k)} style={{width:120,height:90,objectFit:"cover",borderRadius:8,cursor:"zoom-in",border:`1px solid ${c.line2}`}}/>)}</div></div>}
+        {loc.notes&&<div style={sect}><Label style={{marginBottom:6}}>Notes</Label><p style={{fontFamily:UI,fontSize:13.5,lineHeight:1.55,color:c.t1,whiteSpace:"pre-wrap",margin:0}}>{loc.notes}</p></div>}
+      </div>
+    </div>
+  </div>;
+}
 function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFocused}){
   const [ed,setEd]=useState(null);
+  const [detail,setDetail]=useState(null);
   const [dropId,setDropId]=useState("");
-  // Deep-link from a scene's location chip: open that exact location's detail, not just the list.
-  useEffect(()=>{if(!focusLoc)return;const l=project.locations.find(x=>x.id===focusLoc);if(l)setEd(l);onFocused&&onFocused();},[focusLoc]);
+  // Deep-link from a scene's location chip: open the rich detail view, not the edit form.
+  useEffect(()=>{if(!focusLoc)return;const l=project.locations.find(x=>x.id===focusLoc);if(l)setDetail(l);onFocused&&onFocused();},[focusLoc]);
   const save=l=>setProject(p=>({...p,locations:l.id?p.locations.map(x=>x.id===l.id?l:x):[...p.locations,{...l,id:uid(),images:l.images||[],plans:l.plans||[]}]}));
   const del=id=>setProject(p=>({...p,locations:p.locations.filter(x=>x.id!==id),scenes:p.scenes.map(s=>s.locationId===id?{...s,locationId:""}:s)}));
   const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||""};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
@@ -1614,9 +1678,9 @@ function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFo
             onDragLeave={e=>{if(e.currentTarget===e.target)setDropId("");}}
             onDrop={e=>{e.preventDefault();e.stopPropagation();setDropId("");const files=[...(e.dataTransfer.files||[])].filter(x=>x.type.startsWith("image/"));if(files.length)addImagesToLoc(l.id,files);}}
             style={{background:c.bg1,border:`1px solid ${dropId===l.id?c.accent:c.line}`,borderRadius:13,overflow:"hidden",outline:dropId===l.id?`2px dashed ${c.accent}`:"none",outlineOffset:-2}}>
-            {hero?<StoredImg id={hero} style={{width:"100%",height:130,objectFit:"cover",display:"block",cursor:"zoom-in"}} onClick={()=>openLightbox&&openLightbox(gallery,Math.max(0,gallery.indexOf(hero)))}/>:<div style={{height:8}}/>}
+            {hero?<StoredImg id={hero} style={{width:"100%",height:130,objectFit:"cover",display:"block",cursor:"pointer"}} onClick={()=>setDetail(l)}/>:<div style={{height:8}}/>}
             <div style={{padding:14}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{l.name}</div>{l.address&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,marginTop:2}}>{l.address}</div>}</div><div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>{earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" title="Google Earth fly-around" style={{color:c.t2,display:"flex"}}><Compass size={16}/></a>}{mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" title="Maps" style={{color:c.t2,display:"flex"}}><MapPin size={16}/></a>}<IconBtn icon={Settings} size={16} dim onClick={()=>setEd(l)}/></div></div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}><div style={{minWidth:0,cursor:"pointer"}} onClick={()=>setDetail(l)}><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{l.name}</div>{l.address&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,marginTop:2}}>{l.address}</div>}</div><div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>{earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" title="Google Earth fly-around" style={{color:c.t2,display:"flex"}}><Compass size={16}/></a>}{mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" title="Maps" style={{color:c.t2,display:"flex"}}><MapPin size={16}/></a>}<IconBtn icon={Settings} size={16} dim onClick={()=>setEd(l)}/></div></div>
               <div style={{display:"flex",gap:10,margin:"10px 0",alignItems:"center",flexWrap:"wrap"}}>{l.lat&&<TravelChip meta={project.meta} lat={l.lat} lng={l.lng}/>}{l.lat&&<WeatherInline lat={l.lat} lng={l.lng} date={date}/>}{l.images&&l.images.length>0&&<Chip color={c.t2}><ImageIcon size={11}/>{l.images.length}</Chip>}{l.plans&&l.plans.length>0&&<Chip color={c.t2}>{l.plans.length} plan{l.plans.length>1?"s":""}</Chip>}</div>
               {l.lat&&<SunBar lat={l.lat} lng={l.lng} tz={project.meta.tz} date={date}/>}
               <div style={{marginTop:11}}><Label style={{marginBottom:6}}>Scenes here{here.length?` · ${here.length}`:""}</Label>
@@ -1627,6 +1691,7 @@ function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFo
           </div>;})}
       </div>}
     <LocationEditor open={!!ed} init={ed} tz={project.meta.tz} date={ed&&ed.id?(nextDateForLoc(project.scenes,ed.id)||todayISO()):todayISO()} onClose={()=>setEd(null)} onSave={save} onDelete={del}/>
+    {detail&&<LocationDetail loc={detail} scenes={project.scenes} meta={project.meta} tz={project.meta.tz} date={nextDateForLoc(project.scenes,detail.id)||todayISO()} openLightbox={openLightbox} onOpenScene={n=>{setDetail(null);onOpen&&onOpen(n);}} onEdit={()=>{const d=detail;setDetail(null);setEd(d);}} onClose={()=>setDetail(null)}/>}
   </div>;
 }
 
