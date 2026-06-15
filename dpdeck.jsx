@@ -792,34 +792,51 @@ function SunBar({lat,lng,tz,date,hm}){
 }
 function SunCompass({lat,lng,tz,date,hm}){
   const cardOf=deg=>CARD[Math.round((((deg%360)+360)%360)/22.5)%16];
-  const base=useMemo(()=>{try{const t=sunTimes(dayNoonUTC(date),+lat,+lng);const az=d=>d&&!isNaN(d)?azC(sunPos(d,+lat,+lng).az).deg:null;return {sr:az(t.sunrise),ss:az(t.sunset)};}catch{return null;}},[lat,lng,date]);
+  // overhead sun-path plot: center = zenith (90deg up), rim = horizon (0deg); angle = compass azimuth.
+  const calc=useMemo(()=>{try{
+    const t=sunTimes(dayNoonUTC(date),+lat,+lng);
+    const az=d=>d&&!isNaN(d)?azC(sunPos(d,+lat,+lng).az).deg:null;
+    const path=[];
+    for(let m=0;m<=1440;m+=10){const p=sunPos(localToAbs(date,Math.floor(m/60),m%60,tz),+lat,+lng);path.push({az:azC(p.az).deg,alt:p.alt*180/PI});}
+    return {sr:az(t.sunrise),ss:az(t.sunset),noonAlt:sunPos(t.noon,+lat,+lng).alt*180/PI,path};
+  }catch{return null;}},[lat,lng,date,tz]);
   const cur=useMemo(()=>{try{const p=sunPos(localToAbs(date,Math.floor(hm/60),hm%60,tz),+lat,+lng);return {az:azC(p.az).deg,alt:p.alt*180/PI};}catch{return null;}},[lat,lng,tz,date,hm]);
-  if(!base)return null;
+  if(!calc)return null;
   const R=66,cx=78,cy=78,S=156;
   const pt=(deg,r)=>[cx+r*Math.sin(deg*rad),cy-r*Math.cos(deg*rad)];
-  let arcD=null;
-  if(base.sr!=null&&base.ss!=null){const span=(((base.ss-base.sr)%360)+360)%360;const [x1,y1]=pt(base.sr,R),[x2,y2]=pt(base.ss,R);arcD=`M ${x1.toFixed(1)} ${y1.toFixed(1)} A ${R} ${R} 0 ${span>180?1:0} 1 ${x2.toFixed(1)} ${y2.toFixed(1)}`;}
-  const ray=(deg,col)=>{const [x,y]=pt(deg,R);return <line x1={cx} y1={cy} x2={x.toFixed(1)} y2={y.toFixed(1)} stroke={col} strokeWidth={1.4} strokeDasharray="3 3"/>;};
-  const sunR=cur?(cur.alt>0?R*(1-Math.min(cur.alt,90)/90):R):0;
+  const rOf=alt=>R*(1-Math.max(0,Math.min(alt,90))/90);            // 0deg->rim, 90deg->center
+  const ptsFor=arr=>arr.map(p=>{const [x,y]=pt(p.az,rOf(Math.max(0,p.alt)));return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(" ");
+  const above=calc.path.filter(p=>p.alt>=-0.4);
+  const dayPts=ptsFor(above), goldPts=ptsFor(above.filter(p=>p.alt<=6));
+  const sunR=cur?rOf(Math.max(0,cur.alt)):R;
   const [sx,sy]=cur?pt(cur.az,sunR):[cx,cy];
+  let shadow=null;
+  if(cur&&cur.alt>2){const len=Math.min(R*0.92,(R*0.45)/Math.tan(cur.alt*rad)+9);const [ex,ey]=pt((cur.az+180)%360,len);shadow={ex,ey};}
+  const ray=(deg,col)=>{const [x,y]=pt(deg,R);return <line x1={cx} y1={cy} x2={x.toFixed(1)} y2={y.toFixed(1)} stroke={col} strokeWidth={1.2} strokeDasharray="3 3" opacity={0.7}/>;};
   const card=(deg,t)=>{const [x,y]=pt(deg,R+11);return <text x={x.toFixed(1)} y={(y+3).toFixed(1)} textAnchor="middle" style={{fontFamily:MONO,fontSize:9,fill:c.t2}}>{t}</text>;};
   return <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
     <svg width={S} height={S} viewBox={`0 0 ${S} ${S}`} style={{flexShrink:0}}>
-      <line x1={cx-R} y1={cy} x2={cx+R} y2={cy} stroke={c.line} strokeWidth={0.6}/>
-      <line x1={cx} y1={cy-R} x2={cx} y2={cy+R} stroke={c.line} strokeWidth={0.6}/>
-      <circle cx={cx} cy={cy} r={R} fill="none" stroke={c.line2} strokeWidth={1}/>
-      {arcD&&<path d={arcD} fill="none" stroke={c.accent} strokeWidth={3} strokeLinecap="round" opacity={0.45}/>}
-      {base.sr!=null&&ray(base.sr,c.accent)}
-      {base.ss!=null&&ray(base.ss,c.night)}
+      <circle cx={cx} cy={cy} r={R} fill={c.bg2} stroke={c.line2} strokeWidth={1}/>
+      <circle cx={cx} cy={cy} r={rOf(30)} fill="none" stroke={c.line} strokeWidth={0.5}/>
+      <circle cx={cx} cy={cy} r={rOf(60)} fill="none" stroke={c.line} strokeWidth={0.5}/>
+      <line x1={cx-R} y1={cy} x2={cx+R} y2={cy} stroke={c.line} strokeWidth={0.5}/>
+      <line x1={cx} y1={cy-R} x2={cx} y2={cy+R} stroke={c.line} strokeWidth={0.5}/>
+      {dayPts&&<polyline points={dayPts} fill="none" stroke={c.accent} strokeWidth={2} strokeLinejoin="round" opacity={0.85}/>}
+      {goldPts&&<polyline points={goldPts} fill="none" stroke="#ffb24d" strokeWidth={3.2} strokeLinejoin="round" strokeLinecap="round"/>}
+      {calc.sr!=null&&ray(calc.sr,c.accent)}
+      {calc.ss!=null&&ray(calc.ss,c.night)}
+      {shadow&&<line x1={cx} y1={cy} x2={shadow.ex.toFixed(1)} y2={shadow.ey.toFixed(1)} stroke={c.t2} strokeWidth={2} strokeDasharray="2 2"/>}
       {cur&&cur.alt>0&&<line x1={cx} y1={cy} x2={sx.toFixed(1)} y2={sy.toFixed(1)} stroke={c.accent} strokeWidth={1}/>}
       {cur&&<circle cx={sx.toFixed(1)} cy={sy.toFixed(1)} r={cur.alt>0?6:4} fill={cur.alt>0?c.accent:"none"} stroke={c.accent} strokeWidth={cur.alt>0?0:1.4} opacity={cur.alt>0?1:0.5}/>}
       <circle cx={cx} cy={cy} r={2.5} fill={c.t2}/>
       {card(0,"N")}{card(90,"E")}{card(180,"S")}{card(270,"W")}
     </svg>
-    <div style={{fontFamily:UI,fontSize:12,color:c.t1,lineHeight:1.8}}>
-      <div><span style={{color:c.accent}}>●</span> Sunrise {base.sr!=null?`${Math.round(base.sr)}° ${cardOf(base.sr)}`:"—"}</div>
-      <div><span style={{color:c.night}}>●</span> Sunset {base.ss!=null?`${Math.round(base.ss)}° ${cardOf(base.ss)}`:"—"}</div>
-      {cur&&<div style={{color:c.t2,marginTop:5}}>Sun at scrub: {cur.alt>0?`${Math.round(cur.az)}° ${cardOf(cur.az)} · alt ${Math.round(cur.alt)}°`:"below horizon"}</div>}
+    <div style={{fontFamily:UI,fontSize:12,color:c.t1,lineHeight:1.7}}>
+      <div><span style={{color:c.accent}}>●</span> Sunrise {calc.sr!=null?`${Math.round(calc.sr)}° ${cardOf(calc.sr)}`:"—"}</div>
+      <div><span style={{color:c.night}}>●</span> Sunset {calc.ss!=null?`${Math.round(calc.ss)}° ${cardOf(calc.ss)}`:"—"}</div>
+      <div style={{color:c.t2}}>Peak {Math.round(calc.noonAlt)}° at solar noon</div>
+      {cur&&<div style={{color:c.t2,marginTop:4}}>Scrub: {cur.alt>0?`${Math.round(cur.az)}° ${cardOf(cur.az)} · ${Math.round(cur.alt)}° up${cur.alt>2?` · shadow ${cardOf((cur.az+180)%360)}`:""}`:"below horizon"}</div>}
+      <div style={{fontFamily:MONO,fontSize:9.5,color:c.t2,marginTop:5}}><span style={{color:"#ffb24d"}}>━</span> golden · <span style={{color:c.t2}}>┄</span> shadow</div>
     </div>
   </div>;
 }
@@ -830,16 +847,20 @@ function SunPanel({lat,lng,tz,date}){
   if(!date)return <div style={{color:c.t2,fontFamily:UI,fontSize:13}}>Set a shoot day to compute sun.</div>;
   if(!data)return null;
   const a=pos?azC(pos.az):null,al=pos?pos.alt*180/PI:0;
-  const Cell=({ic,l,t})=><div style={{minWidth:58}}><div style={{display:"flex",alignItems:"center",gap:4,color:c.t2,marginBottom:2}}>{ic}<Label>{l}</Label></div><Val size={14}>{fmtT(t,tz)}</Val></div>;
+  let noonAlt=0;try{noonAlt=sunPos(data.noon,+lat,+lng).alt*180/PI;}catch{}
+  const dayLen=(data.sunrise&&data.sunset&&!isNaN(data.sunrise)&&!isNaN(data.sunset))?(()=>{const mins=Math.round((data.sunset-data.sunrise)/60000);return `${Math.floor(mins/60)}h ${String(mins%60).padStart(2,"0")}m`;})():null;
+  const Cell=({ic,l,t})=><div style={{minWidth:54}}><div style={{display:"flex",alignItems:"center",gap:4,color:c.t2,marginBottom:2}}>{ic}<Label>{l}</Label></div><Val size={14}>{fmtT(t,tz)}</Val></div>;
   return <div style={{display:"flex",flexDirection:"column",gap:13}}>
     <SunBar lat={lat} lng={lng} tz={tz} date={date} hm={hm}/>
-    <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+    <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+      <Cell ic={<Clock size={12} color={c.night}/>} l="Blue AM" t={data.dawn}/>
       <Cell ic={<Sunrise size={12} color={c.accent}/>} l="Sunrise" t={data.sunrise}/>
       <Cell ic={<Sun size={12} color={c.accent}/>} l="Gold AM" t={data.goldEnd}/>
       <Cell ic={<Sun size={12} color={c.accent}/>} l="Gold PM" t={data.goldStart}/>
       <Cell ic={<Sunset size={12} color={c.accent}/>} l="Sunset" t={data.sunset}/>
-      <Cell ic={<Clock size={12} color={c.night}/>} l="Dusk" t={data.dusk}/>
+      <Cell ic={<Clock size={12} color={c.night}/>} l="Blue PM" t={data.dusk}/>
     </div>
+    {dayLen&&<div style={{fontFamily:UI,fontSize:11.5,color:c.t2}}>Daylight {dayLen} · solar noon {fmtT(data.noon,tz)} · peak sun {Math.round(noonAlt)}°</div>}
     <SunCompass lat={lat} lng={lng} tz={tz} date={date} hm={hm}/>
     <div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8,flexWrap:"wrap"}}>
@@ -1005,10 +1026,11 @@ function ScreenplayText({text,base,strong,dim,size=12.5}){
 
 /* Full-frame parsed script for the CURRENT scene (not the ground-truth PDF) — a clean,
    large, centered read of this scene's screenplay text. */
-function ScriptFull({scene,onClose}){
-  const closeRef=useRef(onClose);
-  useEffect(()=>{closeRef.current=onClose;},[onClose]);
-  useEffect(()=>{const h=e=>{if(e.key==="Escape")closeRef.current();};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
+function ScriptFull({scene,neighbors,goScene,onClose}){
+  const navRef=useRef({});
+  navRef.current={onClose,prev:neighbors?.prev,next:neighbors?.next,go:goScene};
+  useEffect(()=>{const h=e=>{const n=navRef.current;if(e.key==="Escape")n.onClose&&n.onClose();else if((e.key==="ArrowRight"||e.key==="ArrowDown")&&n.next&&n.go){e.preventDefault();n.go(n.next);}else if((e.key==="ArrowLeft"||e.key==="ArrowUp")&&n.prev&&n.go){e.preventDefault();n.go(n.prev);}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
+  const go=d=>{const t=d<0?neighbors?.prev:neighbors?.next;if(t&&goScene)goScene(t);};
   return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:97,display:"flex",flexDirection:"column"}}>
     <div style={{display:"flex",alignItems:"center",gap:9,padding:"12px 16px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
       <span style={{fontFamily:MONO,fontSize:18,fontWeight:700,color:c.accent}}>{scene.number}</span>
@@ -1016,6 +1038,8 @@ function ScriptFull({scene,onClose}){
       {scene.dayNight&&<Tag label={scene.dayNight} color={dnColor(scene.dayNight)}/>}
       <span style={{fontFamily:UI,fontSize:13.5,fontWeight:600,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{scene.set}</span>
       <div style={{flex:1}}/>
+      <IconBtn icon={ChevronLeft} onClick={()=>go(-1)} dim={!neighbors?.prev} title="Previous scene (left arrow)"/>
+      <IconBtn icon={ChevronRight} onClick={()=>go(1)} dim={!neighbors?.next} title="Next scene (right arrow)"/>
       <IconBtn icon={X} onClick={onClose} dim title="Close (Esc)"/>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:"24px max(18px,calc((100% - 780px)/2))",WebkitOverflowScrolling:"touch"}}>
@@ -1210,7 +1234,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.05fr) minmax(0,1fr) minmax(0,1.05fr)",gap:13,flex:1,minHeight:0}}>{Script}{Reference}{Work}</div>:
       <div style={{display:"flex",flexDirection:"column",gap:13}}>{Script}{Reference}{Work}</div>}
     {onSendRef&&<RefSendModal open={!!sendImg} fromNumber={scene.number} scenes={scenes||[]} onClose={()=>setSendImg(null)} onSend={(toN,mode)=>{onSendRef(scene.number,sendImg,toN,mode);setSendImg(null);onToast&&onToast(mode==="move"?`Moved to scene ${toN}`:`Copied to scene ${toN}`);}}/>}
-    {scriptFull&&<ScriptFull scene={scene} onClose={()=>setScriptFull(false)}/>}
+    {scriptFull&&<ScriptFull scene={scene} neighbors={neighbors} goScene={goScene} onClose={()=>setScriptFull(false)}/>}
   </div>;
 }
 
