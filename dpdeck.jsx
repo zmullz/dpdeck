@@ -1179,6 +1179,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
           </div>
         </Modal>
       </div>
+      {loc&&<LocationCard loc={loc} meta={meta} tz={meta.tz} date={scene.shootDate||todayISO()} openLightbox={openLightbox} onOpen={()=>goScene&&goScene("__loc__"+loc.id)}/>}
     </div>
   </PanelShell>;
 
@@ -1589,6 +1590,38 @@ function LocationEditor({open,init,tz,date,onClose,onSave,onDelete}){
       <WeatherCard lat={f.lat} lng={f.lng} tz={tz} date={date}/>
     </div>}
   </Modal>;
+}
+/* Compact location widget for the bottom of the shots/notes column in the 3-up view. */
+function LocationCard({loc,meta,tz,date,openLightbox,onOpen}){
+  const gallery=(loc.images&&loc.images.length?loc.images:(loc.imgId?[loc.imgId]:[]));
+  const lat=loc.lat,lng=loc.lng,name=loc.name||"Location";
+  const mapsHref=loc.address?`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address)}`:(lat?`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`:null);
+  const appleHref=lat?`https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(name)}`:(loc.address?`https://maps.apple.com/?q=${encodeURIComponent(loc.address)}`:null);
+  const earthHref=lat?`https://earth.google.com/web/search/${lat},${lng}`:null;
+  const shown=gallery.slice(0,12);
+  return <div style={{border:`1px solid ${c.line}`,borderRadius:11,overflow:"hidden",background:c.bg1}}>
+    <button onClick={onOpen} style={{width:"100%",display:"flex",alignItems:"center",gap:8,padding:"9px 12px",background:"none",border:"none",borderBottom:`1px solid ${c.line}`,cursor:"pointer",textAlign:"left"}}>
+      <MapPin size={14} color={c.accent}/>
+      <span style={{fontFamily:UI,fontWeight:700,fontSize:13.5,color:c.t0,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</span>
+      <span style={{fontFamily:UI,fontSize:11,color:c.accent}}>Open page</span><ChevronRight size={14} color={c.accent}/>
+    </button>
+    <div style={{padding:12,display:"flex",flexDirection:"column",gap:11}}>
+      {shown.length>0&&<div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:2}}>
+        {shown.map((g,k)=><div key={k} onClick={()=>openLightbox&&openLightbox(gallery,k)} style={{flexShrink:0,cursor:"zoom-in"}}><StoredImg id={g} style={{width:80,height:60,objectFit:"cover",borderRadius:7,display:"block"}}/></div>)}
+        {gallery.length>shown.length&&<button onClick={onOpen} style={{flexShrink:0,width:80,height:60,borderRadius:7,border:`1px solid ${c.line2}`,background:c.bg2,color:c.t2,fontFamily:UI,fontSize:12,cursor:"pointer"}}>+{gallery.length-shown.length}</button>}
+      </div>}
+      <div style={{display:"flex",flexWrap:"wrap",gap:9,alignItems:"center"}}>
+        {meta&&lat&&<TravelChip meta={meta} lat={lat} lng={lng}/>}
+        {loc.address&&<span style={{fontFamily:UI,fontSize:12,color:c.t2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}><MapPin size={11} style={{verticalAlign:"-1px"}}/> {loc.address}</span>}
+      </div>
+      <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+        {mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><MapPin size={13}/>Maps</Btn></a>}
+        {appleHref&&<a href={appleHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><MapPin size={13}/>Apple</Btn></a>}
+        {earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}><Btn kind="ghost" size={11}><Compass size={13}/>Earth</Btn></a>}
+      </div>
+      {lat&&lng&&<div style={{borderTop:`1px solid ${c.line}`,paddingTop:10}}><Label style={{marginBottom:7}}>Sun · {date}</Label><SunPanel lat={lat} lng={lng} tz={tz} date={date}/></div>}
+    </div>
+  </div>;
 }
 /* Rich, read-first location page: flip-through photos, map links, sun, weather, travel, scenes. */
 function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,openLightbox}){
