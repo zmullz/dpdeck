@@ -45,7 +45,7 @@ const STATUS = [
   { k:"ready", label:"Ready", color:"#74B98C" },
   { k:"shot", label:"Shot", color:"#9aa0a8" },
 ];
-const DEPTS = [ { k:"camera", label:"Camera" }, { k:"grip", label:"Grip" }, { k:"electric", label:"Electric" } ];
+const DEPTS = [ { k:"camera", label:"Camera", abbr:"C" }, { k:"grip", label:"Grip", abbr:"G" }, { k:"electric", label:"Electric", abbr:"E" }, { k:"sfx", label:"Special FX", abbr:"SFX" } ];
 
 /* at-a-glance color coding for slug + time of day (the lighting-relevant flags) */
 const slugColor=s=>s==="EXT"?c.extC:s==="INT/EXT"?"#C98AA0":c.intC;
@@ -607,7 +607,7 @@ function applyProjectFile(p,inc){
     const s=scenes[i];
     if(Array.isArray(isc.shots)&&isc.shots.length){const have=new Set(s.shots.map(x=>x.text));for(const t of isc.shots){if(t&&!have.has(t)){s.shots.push({id:uid(),text:String(t),done:false});have.add(t);}}}
     if(isc.notes&&!(s.notes||"").includes(isc.notes))s.notes=s.notes?(s.notes+"\n"+isc.notes):isc.notes;
-    if(Array.isArray(isc.gear))for(const g of isc.gear){if(!g||!g.name)continue;const dept=["camera","grip","electric"].includes(g.dept)?g.dept:"camera";const id=ensureGear(g.name,dept);if(!s.gearTags.includes(id))s.gearTags.push(id);}
+    if(Array.isArray(isc.gear))for(const g of isc.gear){if(!g||!g.name)continue;const dept=DEPTS.some(d=>d.k===g.dept)?g.dept:"camera";const id=ensureGear(g.name,dept);if(!s.gearTags.includes(id))s.gearTags.push(id);}
     if(Array.isArray(isc.refs)&&isc.refs.length){const have=new Set(s.refs);for(const r of isc.refs){if(r&&!have.has(r)){s.refs.push(r);have.add(r);}}}
   });
   let out={...p,meta:{...p.meta,...(inc.meta||{})},scenes,gear};
@@ -1251,7 +1251,7 @@ function GearBlock({scene,gearList,addGear,patchScene}){
   const [t,setT]=useState(""),[dept,setDept]=useState("camera"),[busy,setBusy]=useState(false);
   const tagged=scene.gearTags.map(id=>gearList.find(g=>g.id===id)).filter(Boolean);
   const add=()=>{const v=t.trim();if(!v)return;addGear(v,dept);setT("");};
-  const suggest=async()=>{setBusy(true);try{const prompt=`A film scene. Suggest specific camera, grip, and electric gear it may need, as a JSON array of {"text":"item","dept":"camera|grip|electric"}. Be concrete and brief, max 6 items. Scene: ${scene.slug} ${scene.set}, ${scene.dayNight}. ${scene.syn||""} ${scene.notes||""}. Return ONLY the JSON array.`;const arr=extractJSON(await callClaude(prompt,1200));const cur=scene.aiGear||[];const add2=arr.filter(a=>a.text&&!cur.some(x=>x.text.toLowerCase()===a.text.toLowerCase())).map(a=>({text:a.text,dept:DEPTS.some(d=>d.k===a.dept)?a.dept:"camera",dismissed:false}));patchScene({aiGear:[...cur,...add2]});}catch(e){}setBusy(false);};
+  const suggest=async()=>{setBusy(true);try{const prompt=`A film scene. Suggest specific camera, grip, electric, and special-effects gear it may need, as a JSON array of {"text":"item","dept":"camera|grip|electric|sfx"}. Be concrete and brief, max 6 items. Scene: ${scene.slug} ${scene.set}, ${scene.dayNight}. ${scene.syn||""} ${scene.notes||""}. Return ONLY the JSON array.`;const arr=extractJSON(await callClaude(prompt,1200));const cur=scene.aiGear||[];const add2=arr.filter(a=>a.text&&!cur.some(x=>x.text.toLowerCase()===a.text.toLowerCase())).map(a=>({text:a.text,dept:DEPTS.some(d=>d.k===a.dept)?a.dept:"camera",dismissed:false}));patchScene({aiGear:[...cur,...add2]});}catch(e){}setBusy(false);};
   const promote=(s)=>{addGear(s.text,s.dept);patchScene({aiGear:scene.aiGear.map(x=>x===s?{...x,dismissed:true}:x)});};
   const live=(scene.aiGear||[]).filter(s=>!s.dismissed&&!tagged.some(g=>g.name.toLowerCase()===s.text.toLowerCase()));
   return <div>
@@ -1259,10 +1259,10 @@ function GearBlock({scene,gearList,addGear,patchScene}){
     {DEPTS.map(d=>{const items=tagged.filter(g=>g.dept===d.k);if(!items.length)return null;return <div key={d.k} style={{marginBottom:7}}><div style={{fontFamily:MONO,fontSize:10,color:c.t2,marginBottom:4}}>{d.label}</div><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{items.map(g=><span key={g.id} style={{display:"inline-flex",alignItems:"center",gap:5,background:c.bg2,border:`1px solid ${c.line2}`,borderRadius:7,padding:"4px 8px",fontFamily:UI,fontSize:12.5,color:c.t0}}>{g.name}<X size={12} style={{cursor:"pointer",color:c.t2}} onClick={()=>patchScene({gearTags:scene.gearTags.filter(x=>x!==g.id)})}/></span>)}</div></div>;})}
     {live.length>0&&<div style={{margin:"4px 0 8px",border:`1px solid ${c.accent}33`,borderRadius:9,padding:9,background:c.accentSoft}}>
       <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:6}}><Sparkles size={12} color={c.accent}/><Label style={{color:c.accent}}>Suggested — tap to add</Label></div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>{live.map((s,i)=><span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:c.bg1,border:`1px solid ${c.line2}`,borderRadius:7,padding:"4px 6px 4px 9px",fontFamily:UI,fontSize:12.5,color:c.t1}}>{s.text}<span style={{fontFamily:MONO,fontSize:9,color:c.t2}}>{s.dept[0].toUpperCase()}</span><button onClick={()=>promote(s)} style={{border:"none",background:c.accent,color:"#17120a",borderRadius:5,width:18,height:18,display:"grid",placeItems:"center",cursor:"pointer"}}><Plus size={12}/></button><X size={12} style={{cursor:"pointer",color:c.t2}} onClick={()=>patchScene({aiGear:scene.aiGear.map(x=>x===s?{...x,dismissed:true}:x)})}/></span>)}</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>{live.map((s,i)=><span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:c.bg1,border:`1px solid ${c.line2}`,borderRadius:7,padding:"4px 6px 4px 9px",fontFamily:UI,fontSize:12.5,color:c.t1}}>{s.text}<span style={{fontFamily:MONO,fontSize:9,color:c.t2}}>{(DEPTS.find(d=>d.k===s.dept)||{}).abbr||s.dept[0].toUpperCase()}</span><button onClick={()=>promote(s)} style={{border:"none",background:c.accent,color:"#17120a",borderRadius:5,width:18,height:18,display:"grid",placeItems:"center",cursor:"pointer"}}><Plus size={12}/></button><X size={12} style={{cursor:"pointer",color:c.t2}} onClick={()=>patchScene({aiGear:scene.aiGear.map(x=>x===s?{...x,dismissed:true}:x)})}/></span>)}</div>
     </div>}
     <div style={{display:"flex",gap:6,alignItems:"center"}}>
-      <div style={{display:"flex",gap:3}}>{DEPTS.map(d=><button key={d.k} onClick={()=>setDept(d.k)} title={d.label} style={{width:30,height:38,borderRadius:7,border:`1px solid ${dept===d.k?c.accent:c.line2}`,background:dept===d.k?c.accentSoft:c.bg2,color:dept===d.k?c.accent:c.t2,fontFamily:MONO,fontSize:12,fontWeight:700,cursor:"pointer"}}>{d.label[0]}</button>)}</div>
+      <div style={{display:"flex",gap:3}}>{DEPTS.map(d=><button key={d.k} onClick={()=>setDept(d.k)} title={d.label} style={{minWidth:30,padding:"0 5px",height:38,borderRadius:7,border:`1px solid ${dept===d.k?c.accent:c.line2}`,background:dept===d.k?c.accentSoft:c.bg2,color:dept===d.k?c.accent:c.t2,fontFamily:MONO,fontSize:12,fontWeight:700,cursor:"pointer"}}>{d.abbr}</button>)}</div>
       <TextInput value={t} placeholder="Add gear…" onChange={e=>setT(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} style={{minHeight:38}}/>
       <IconBtn icon={Plus} onClick={add}/>
     </div>
