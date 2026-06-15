@@ -980,15 +980,17 @@ function ScriptFull({scene,onClose}){
 }
 
 /* ---- script pages for one scene --------------------------------- */
-function ScriptPages({scene,bump,onMark}){
+function ScriptPages({scene,bump,onMark,off=0}){
   const [pages,setPages]=useState(null);
   const ready=!!scriptDoc.doc;
   useEffect(()=>{let on=true;(async()=>{
     if(!scriptDoc.doc||!scene.pageStart){setPages([]);return;}
-    const ink=await loadScriptInk(scene.number);const out=[];
-    for(let n=scene.pageStart;n<=(scene.pageEnd||scene.pageStart);n++){try{const img=await getScriptPageImage(n);if(img)out.push({n,url:img.url,aspect:img.w/img.h,ink:ink[n]});}catch{}}
+    const ink=await loadScriptInk(scene.number);const out=[];const np=scriptDoc.doc?.numPages||9999;
+    // pageStart is the screenplay's PRINTED page number; the PDF has front matter (a title page),
+    // so render the PHYSICAL pdf.js page = printed + off. Label/ink stay keyed to the printed page.
+    for(let n=scene.pageStart;n<=(scene.pageEnd||scene.pageStart);n++){try{const img=await getScriptPageImage(Math.min(n+off,np));if(img)out.push({n,url:img.url,aspect:img.w/img.h,ink:ink[n]});}catch{}}
     if(on)setPages(out);
-  })();return()=>{on=false;};},[scene.number,scene.pageStart,scene.pageEnd,ready,bump]);
+  })();return()=>{on=false;};},[scene.number,scene.pageStart,scene.pageEnd,ready,bump,off]);
   return <div style={{display:"flex",flexDirection:"column",gap:13}}>
     <div>
       <div style={{display:"flex",gap:7,alignItems:"center",marginBottom:7,flexWrap:"wrap"}}>
@@ -1084,7 +1086,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
 
   const Script=<PanelShell wide={wide} title="Script" icon={<FileText size={14} color={c.accent}/>}
     action={scene.scriptText&&<IconBtn icon={Maximize2} size={17} dim title="Full-screen script for this scene" onClick={()=>setScriptFull(true)}/>}>
-    <ScriptPages scene={scene} bump={bump} onMark={markPage}/>
+    <ScriptPages scene={scene} bump={bump} onMark={markPage} off={+(meta?.scriptPageOffset||0)}/>
   </PanelShell>;
 
   const Reference=<PanelShell wide={wide} title={`Reference${scene.refs.length?` · ${scene.refs.length}`:""}`} icon={<ImageIcon size={14} color={c.accent}/>}
