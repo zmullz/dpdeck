@@ -5,6 +5,7 @@ import {
   Inbox, Sun, Sunrise, Sunset, CloudSun, Cloud, CloudRain, CloudSnow, CloudFog,
   CloudDrizzle, CloudLightning, Navigation, Phone, Mail, Volume2, Settings,
   MoonStar, SunMedium, Sparkles, Clock, ListChecks, Compass, Maximize2, CloudDownload, Home, Printer,
+  ArrowLeft, ArrowRight, Copy, Send,
 } from "lucide-react";
 import { get as idbGet, set as idbSet, del as idbDel, keys as idbKeys, createStore as idbCreateStore } from "idb-keyval";
 
@@ -227,8 +228,8 @@ function Btn({children,onClick,kind="ghost",style,disabled,size}){
   const k={primary:{background:c.accent,color:"#17120a",border:"none"},ghost:{background:c.bg2,color:c.t0,border:`1px solid ${c.line2}`},quiet:{background:"transparent",color:c.t1,border:`1px solid ${c.line}`},danger:{background:"transparent",color:c.danger,border:`1px solid ${c.danger}55`}}[kind];
   return <button onClick={onClick} disabled={disabled} style={{fontFamily:UI,fontSize:size||13,fontWeight:650,padding:size===12?"7px 11px":"9px 14px",borderRadius:9,cursor:disabled?"default":"pointer",opacity:disabled?0.45:1,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:7,minHeight:size===12?34:40,...k,...style}}>{children}</button>;
 }
-function IconBtn({icon:Icon,onClick,active,title,size=20,danger,dim}){
-  return <button title={title} onClick={onClick} style={{width:40,height:40,borderRadius:9,display:"grid",placeItems:"center",cursor:"pointer",background:active?c.accentSoft:dim?"transparent":c.bg2,border:`1px solid ${active?c.accent:dim?"transparent":c.line2}`,color:danger?c.danger:active?c.accent:c.t1,flexShrink:0}}><Icon size={size}/></button>;
+function IconBtn({icon:Icon,onClick,active,title,size=20,danger,dim,style}){
+  return <button title={title} onClick={onClick} style={{width:40,height:40,borderRadius:9,display:"grid",placeItems:"center",cursor:"pointer",background:active?c.accentSoft:dim?"transparent":c.bg2,border:`1px solid ${active?c.accent:dim?"transparent":c.line2}`,color:danger?c.danger:active?c.accent:c.t1,flexShrink:0,...style}}><Icon size={size}/></button>;
 }
 const inputStyle=()=>({fontFamily:UI,fontSize:14,color:c.t0,background:c.bg2,border:`1px solid ${c.line2}`,borderRadius:9,padding:"10px 12px",outline:"none",width:"100%",minHeight:42,boxSizing:"border-box"});
 function TextInput(p){const {style,...r}=p;return <input {...r} style={{...inputStyle(),...style}}/>;}
@@ -416,6 +417,41 @@ function linkLocations(scenes,parsed,locations){
   if(!want.size)return scenes;
   return scenes.map(s=>{const id=want.get(numKey(s.number));return id&&s.locationId!==id?{...s,locationId:id}:s;});
 }
+/* Canonical location name from a slugline set, e.g. "HOSPITAL - MARTY'S ROOM" -> "Hospital",
+   "MARTY/STELLA HOUSE - KITCHEN" -> "Marty & Stella's House". Used to auto-populate the
+   Locations list on every script import so the places in the script become real locations. */
+const LOC_SKIP=/^(VARIOUS|CONTINUOUS|MONTAGE|INTERCUT|SERIES OF SHOTS|TBD|BLACK|BLACKNESS|LATER|MOMENTS LATER|SAME)$/i;
+function canonLocName(set){
+  if(!set)return "";
+  let b=String(set).replace(/[’‘`]/g,"'");
+  b=b.replace(/^\s*(INT\.?\/EXT\.?|INT\.?|EXT\.?|I\/E\.?)\s+/i,"");
+  b=b.split(/\s+[-–—]\s+/)[0].split(/[,(]/)[0];
+  b=b.replace(/^[\s\-–—]+/,"").replace(/\s+/g," ").trim();
+  if(!b||LOC_SKIP.test(b))return "";
+  if(/marty/i.test(b)&&/stella/i.test(b))return "Marty & Stella's House";
+  b=b.replace(/\bapt\b\.?/gi,"Apartment");
+  let n=b.toLowerCase().replace(/\b([a-z])/g,m=>m.toUpperCase());
+  n=n.replace(/'S\b/g,"'s").replace(/\.+$/,"").trim();
+  return n;
+}
+/* For every non-omitted scene that has no location yet, derive its canonical location from the
+   set, create the location if missing (matched by name), and link the scene to it. Idempotent:
+   scenes already linked and manual links are left untouched; existing locations are reused. */
+function deriveLocations(scenes,locations){
+  const locs=(locations||[]).map(l=>({...l}));
+  const byName=new Map(locs.map(l=>[(l.name||"").trim().toLowerCase(),l]));
+  let added=0,linked=0;
+  const outScenes=(scenes||[]).map(s=>{
+    if(s.locationId||s.status==="omitted")return s;
+    const name=((s.loc||"").trim())||canonLocName(s.set);
+    if(!name)return s;
+    let loc=byName.get(name.toLowerCase());
+    if(!loc){loc={id:uid(),name,address:"",lat:"",lng:"",radius:"",notes:"",images:[],plans:[],imgId:""};locs.push(loc);byName.set(name.toLowerCase(),loc);added++;}
+    linked++;
+    return {...s,locationId:loc.id};
+  });
+  return {scenes:outScenes,locations:locs,added,linked};
+}
 function applyCrew(existing,incoming){
   const crew={camera:[...(existing.camera||[])],grip:[...(existing.grip||[])],electric:[...(existing.electric||[])]};
   const maps={camera:new Map(),grip:new Map(),electric:new Map()};
@@ -476,6 +512,7 @@ function applyProjectFile(p,inc){
   if(Array.isArray(inc.crew)&&inc.crew.length)out.crew=applyCrew(out.crew,inc.crew).merged;
   if(Array.isArray(inc.contacts)&&inc.contacts.length)out.contacts=applyContacts(out.contacts,inc.contacts).merged;
   if(Array.isArray(inc.look)&&inc.look.length)out.look=uniq([...(out.look||[]),...inc.look]);
+  const d=deriveLocations(out.scenes,out.locations||[]);out.scenes=d.scenes;out.locations=d.locations;
   return out;
 }
 
@@ -692,9 +729,31 @@ function TravelChip({meta,lat,lng}){
   const min=Math.max(1,Math.round(km/(meta.avgKmh||28)*60));
   return <a href={`https://www.google.com/maps/dir/?api=1&origin=${meta.baseLat},${meta.baseLng}&destination=${lat},${lng}`} target="_blank" rel="noreferrer" style={{textDecoration:"none"}} title="Straight-line estimate, tap for live directions"><Chip color={c.ok}><Navigation size={11}/>{km<10?km.toFixed(1):Math.round(km)} km · ~{min} min</Chip></a>;
 }
-function Lightbox({src,onClose}){
-  if(!src)return null;
-  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000d",zIndex:95,display:"grid",placeItems:"center",padding:16}}><img src={src} style={{maxWidth:"100%",maxHeight:"100%",borderRadius:8}} alt=""/><IconBtn icon={X} onClick={onClose} size={20} style={{position:"absolute",top:16,right:16}}/></div>;
+/* Fullscreen image viewer with a carousel: takes an ordered list of image ids/urls + a start
+   index, so you can flip prev/next through a scene's references (arrows, keys, or swipe). */
+function Lightbox({state,onClose}){
+  const items=state&&state.items&&state.items.length?state.items:null;
+  const [i,setI]=useState(0);
+  const touch=useRef(null);
+  useEffect(()=>{if(state)setI(clamp(state.i||0,0,(state.items?.length||1)-1));},[state]);
+  useEffect(()=>{if(!items)return;const h=e=>{if(e.key==="Escape")onClose();else if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();setI(x=>Math.min(x+1,items.length-1));}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();setI(x=>Math.max(x-1,0));}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[items,onClose]);
+  if(!items)return null;
+  const idx=clamp(i,0,items.length-1),id=items[idx],many=items.length>1;
+  const go=(d,e)=>{e&&e.stopPropagation();setI(x=>clamp(x+d,0,items.length-1));};
+  const nav={width:50,height:50,borderRadius:"50%",border:"none",background:"#0009",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"};
+  const ts=e=>{touch.current=e.touches[0].clientX;};
+  const te=e=>{if(touch.current==null)return;const dx=e.changedTouches[0].clientX-touch.current;touch.current=null;if(Math.abs(dx)>45)go(dx<0?1:-1);};
+  return <div onClick={onClose} onTouchStart={ts} onTouchEnd={te} style={{position:"fixed",inset:0,background:"#000e",zIndex:95,display:"flex",alignItems:"center",justifyContent:"center",padding:"calc(16px + env(safe-area-inset-top)) 16px"}}>
+    <div onClick={e=>e.stopPropagation()} style={{maxWidth:"100%",maxHeight:"100%",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <StoredImg id={id} style={{maxWidth:"100%",maxHeight:"86vh",objectFit:"contain",borderRadius:8,display:"block"}}/>
+    </div>
+    <IconBtn icon={X} onClick={onClose} size={20} style={{position:"absolute",top:16,right:16}}/>
+    {many&&<>
+      <button onClick={e=>go(-1,e)} style={{...nav,position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",opacity:idx===0?0.4:1}}><ChevronLeft size={26}/></button>
+      <button onClick={e=>go(1,e)} style={{...nav,position:"absolute",right:14,top:"50%",transform:"translateY(-50%)",opacity:idx===items.length-1?0.4:1}}><ChevronRight size={26}/></button>
+      <div style={{position:"absolute",bottom:18,left:"50%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:12,color:"#fff",background:"#0009",borderRadius:20,padding:"5px 12px"}}>{idx+1} / {items.length}</div>
+    </>}
+  </div>;
 }
 
 /* ---- ink + sketch persistence ----------------------------------- */
@@ -710,6 +769,45 @@ function SketchThumb({id,rev,onClick,style}){
   const [d,setD]=useState(null);
   useEffect(()=>{let on=true;loadSketch(id).then(x=>on&&setD(x));return()=>{on=false;};},[id,rev]);
   return <div onClick={onClick} style={{cursor:"pointer",borderRadius:9,overflow:"hidden",border:`1px solid ${c.line2}`,background:c.bg2,...style}}>{d?<InkThumb data={d}/>:null}</div>;
+}
+
+/* Render screenplay text in true script layout: classify each line by its leading indent
+   (action / character cue / parenthetical / dialogue), drop watermark crumbs that bleed through
+   the source PDF, and lay it out with column-fitting indents so it reads like the real pages on
+   any screen. The source keeps real newlines + indentation; this reads that structure. */
+function ScreenplayText({text,base,strong,dim,size=12.5}){
+  base=base||c.t1;strong=strong||c.t0;dim=dim||c.t2;
+  const lines=useMemo(()=>{
+    const out=[];
+    for(const ln of (text||"").split("\n")){
+      const indent=(ln.match(/^ */)||[""])[0].length;
+      const t=ln.trim();
+      if(!t){out.push({type:"sp"});continue;}
+      if(/^[A-Za-z]{1,2}$/.test(t))continue;                       // watermark crumbs (La, ur, Kl)
+      const upper=t===t.toUpperCase();
+      if(t.startsWith("(")&&/\)$/.test(t)){out.push({type:"paren",t});continue;}
+      if(indent>=18){
+        if(upper&&/^[-A-Z0-9 .,'’()\/&]+$/.test(t)&&t.length<=34){out.push({type:"cue",t});continue;}
+        if(t.length<=3)continue;                                    // lowercase crumb at cue indent (ein)
+        out.push({type:"dia",t});continue;
+      }
+      out.push({type:indent>=8?"dia":"act",t});
+    }
+    const o=[];for(const l of out){if(l.type==="sp"&&(!o.length||o[o.length-1].type==="sp"))continue;o.push(l);}
+    while(o.length&&o[o.length-1].type==="sp")o.pop();
+    while(o.length&&o[0].type==="sp")o.shift();
+    return o;
+  },[text]);
+  if(!lines.length)return null;
+  return <div style={{fontFamily:MONO,fontSize:size,lineHeight:1.5}}>
+    {lines.map((l,i)=>{
+      if(l.type==="sp")return <div key={i} style={{height:size*0.7}}/>;
+      if(l.type==="cue")return <div key={i} style={{paddingLeft:"3.1em",color:strong,fontWeight:700}}>{l.t}</div>;
+      if(l.type==="paren")return <div key={i} style={{paddingLeft:"2.4em",paddingRight:"1.4em",color:dim,fontStyle:"italic"}}>{l.t}</div>;
+      if(l.type==="dia")return <div key={i} style={{paddingLeft:"1.6em",paddingRight:"1em",color:base}}>{l.t}</div>;
+      return <div key={i} style={{color:base}}>{l.t}</div>;
+    })}
+  </div>;
 }
 
 /* ---- script pages for one scene --------------------------------- */
@@ -731,7 +829,7 @@ function ScriptPages({scene,bump,onMark}){
       </div>
       {scene.syn&&<p style={{fontFamily:UI,fontSize:13.5,lineHeight:1.55,color:c.t1,margin:0}}>{scene.syn}</p>}
     </div>
-    {scene.scriptText&&<div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}><Label style={{marginBottom:7}}>Script</Label><pre style={{fontFamily:MONO,fontSize:12,lineHeight:1.5,color:c.t1,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{scene.scriptText}</pre></div>}
+    {scene.scriptText&&<div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}><Label style={{marginBottom:9}}>Script</Label><ScreenplayText text={scene.scriptText}/></div>}
     {pages===null&&ready&&scene.pageStart>0&&<div style={{color:c.t2,fontFamily:UI,fontSize:13}}>Rendering pages…</div>}
     {pages&&pages.map(p=>(
       <div key={p.n} onClick={()=>onMark(p.n,p.ink,p.url,p.aspect)} style={{position:"relative",borderRadius:10,overflow:"hidden",border:`1px solid ${c.line2}`,cursor:"pointer",aspectRatio:String(p.aspect||0.72)}}>
@@ -757,8 +855,8 @@ function PanelShell({title,icon,action,children,wide}){
     <div style={{padding:14,overflowY:wide?"auto":"visible",flex:wide?1:"none",minHeight:0}}>{children}</div>
   </div>;
 }
-function SceneView({scene,meta,locations,gearList,wide,patchScene,openInk,openLightbox,addGear,goScene,neighbors,openInfo,onToast}){
-  const [bump,setBump]=useState(0),[drag,setDrag]=useState(false),[pickBg,setPickBg]=useState(false);
+function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk,openLightbox,addGear,goScene,neighbors,openInfo,onToast,onSendRef}){
+  const [bump,setBump]=useState(0),[drag,setDrag]=useState(false),[pickBg,setPickBg]=useState(false),[sendImg,setSendImg]=useState(null);
   const fileRef=useRef(null),camRef=useRef(null);
   const loc=locations.find(l=>l.id===scene.locationId);
   const plans=loc?.plans||[];
@@ -818,10 +916,13 @@ function SceneView({scene,meta,locations,gearList,wide,patchScene,openInk,openLi
       style={drag?{outline:`2px dashed ${c.accent}`,outlineOffset:3,borderRadius:10}:undefined}>
       {scene.refs.length===0?
         <div style={{border:`1px dashed ${c.line2}`,borderRadius:10,padding:"22px 12px",textAlign:"center",color:c.t2,fontFamily:UI,fontSize:12.5,lineHeight:1.5}}>Drop, paste, or shoot reference. Frames, locations, lighting, anything.</div>:
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(96px,1fr))",gap:8}}>
-          {scene.refs.map(id=><div key={id} style={{position:"relative",aspectRatio:"1",borderRadius:9,overflow:"hidden",border:`1px solid ${c.line2}`}}>
-            <StoredImg id={id} style={{width:"100%",height:"100%",objectFit:"cover",cursor:"zoom-in"}} onClick={async()=>openLightbox(isImgUrl(id)?id:await store.get("pb:img:"+id))}/>
-            <button onClick={()=>patchScene({refs:scene.refs.filter(x=>x!==id)})} style={{position:"absolute",top:4,right:4,width:22,height:22,borderRadius:"50%",border:"none",background:"#000a",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"}}><X size={13}/></button>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {scene.refs.map((id,idx)=><div key={id} style={{position:"relative",borderRadius:10,overflow:"hidden",border:`1px solid ${c.line2}`,background:c.bg2}}>
+            <StoredImg id={id} style={{width:"100%",height:"auto",display:"block",cursor:"zoom-in",minHeight:42}} onClick={()=>openLightbox(scene.refs,idx)}/>
+            <div style={{position:"absolute",top:6,right:6,display:"flex",gap:6}}>
+              {onSendRef&&<button onClick={()=>setSendImg(id)} title="Copy or move to another scene" style={{width:28,height:28,borderRadius:"50%",border:"none",background:"#000b",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"}}><Send size={14}/></button>}
+              <button onClick={()=>patchScene({refs:scene.refs.filter(x=>x!==id)})} title="Remove" style={{width:28,height:28,borderRadius:"50%",border:"none",background:"#000b",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"}}><X size={14}/></button>
+            </div>
           </div>)}
         </div>}
     </div>
@@ -863,6 +964,7 @@ function SceneView({scene,meta,locations,gearList,wide,patchScene,openInk,openLi
     {wide?
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.05fr) minmax(0,1fr) minmax(0,1.05fr)",gap:13,flex:1,minHeight:0}}>{Script}{Reference}{Work}</div>:
       <div style={{display:"flex",flexDirection:"column",gap:13}}>{Script}{Reference}{Work}</div>}
+    {onSendRef&&<RefSendModal open={!!sendImg} fromNumber={scene.number} scenes={scenes||[]} onClose={()=>setSendImg(null)} onSend={(toN,mode)=>{onSendRef(scene.number,sendImg,toN,mode);setSendImg(null);onToast&&onToast(mode==="move"?`Moved to scene ${toN}`:`Copied to scene ${toN}`);}}/>}
   </div>;
 }
 
@@ -1005,6 +1107,26 @@ function ScenePicker({open,scenes,onPick,onClose,suggestN}){
         <span style={{fontFamily:MONO,fontSize:14,fontWeight:700,color:c.accent,minWidth:36}}>{s.number}</span>
         <span style={{flex:1,minWidth:0}}><span style={{fontFamily:UI,fontSize:13.5,color:c.t0,fontWeight:600}}>{s.set}</span><span style={{fontFamily:MONO,fontSize:10,color:c.t2,marginLeft:7}}>{s.slug} {s.dayNight}</span></span>
         {s.number===suggestN&&<Chip color={c.accent} small><Sparkles size={10}/>AI</Chip>}
+      </button>)}
+    </div>
+  </Modal>;
+}
+
+/* Move or copy a reference image to another scene. Copy keeps it on both (same stored image,
+   no duplication of bytes); Move takes it off the source. Built for quick taps on iPad. */
+function RefSendModal({open,fromNumber,scenes,onClose,onSend}){
+  const [mode,setMode]=useState("copy"),[q,setQ]=useState("");
+  useEffect(()=>{if(open){setMode("copy");setQ("");}},[open]);
+  const list=scenes.filter(s=>s.status!=="omitted"&&s.number!==fromNumber).filter(s=>!q.trim()||(s.number+" "+s.set+" "+(s.syn||"")+" "+s.slug).toLowerCase().includes(q.toLowerCase())).sort((a,b)=>(a.storyIndex??0)-(b.storyIndex??0));
+  return <Modal open={open} onClose={onClose} title="Send reference to a scene">
+    <div style={{maxWidth:260,marginBottom:10}}><Segmented value={mode} onChange={v=>setMode(v||"copy")} options={[{k:"copy",label:"Copy"},{k:"move",label:"Move"}]}/></div>
+    <div style={{fontFamily:UI,fontSize:12,color:c.t2,marginBottom:12,lineHeight:1.45}}>{mode==="copy"?"Keeps it here and adds it to the scene you pick.":"Removes it from this scene and adds it to the scene you pick."}</div>
+    <div style={{position:"relative",marginBottom:12}}><Search size={16} color={c.t2} style={{position:"absolute",left:11,top:13}}/><TextInput autoFocus value={q} placeholder="Search scenes…" onChange={e=>setQ(e.target.value)} style={{paddingLeft:34}}/></div>
+    <div style={{maxHeight:"44vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:6}}>
+      {list.map(s=><button key={s.number||s.storyIndex} onClick={()=>onSend(s.number,mode)} style={{display:"flex",alignItems:"center",gap:11,padding:"11px 11px",background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,cursor:"pointer",textAlign:"left"}}>
+        <span style={{fontFamily:MONO,fontSize:14,fontWeight:700,color:c.accent,minWidth:36}}>{s.number}</span>
+        <span style={{flex:1,minWidth:0}}><span style={{fontFamily:UI,fontSize:13.5,color:c.t0,fontWeight:600}}>{s.set||"Untitled"}</span><span style={{fontFamily:MONO,fontSize:10,color:c.t2,marginLeft:7}}>{s.slug} {s.dayNight}</span></span>
+        {mode==="copy"?<Copy size={15} color={c.t2}/>:<ArrowRight size={15} color={c.t2}/>}
       </button>)}
     </div>
   </Modal>;
@@ -1188,14 +1310,18 @@ function Dashboard({project,onOpen,onNav}){
 function nextDateForLoc(scenes,locId){const ds=scenes.filter(s=>s.locationId===locId&&s.shootDate).map(s=>s.shootDate).sort();const t=todayISO();return ds.find(d=>d>=t)||ds[0]||"";}
 function LocationEditor({open,init,tz,date,onClose,onSave,onDelete}){
   const [f,set,setF]=useForm(init,open);
+  const [dragF,setDragF]=useState("");
+  // While the editor is open, swallow page-level drops so a near-miss outside the dashed zone
+  // does not make the browser navigate to the image file (the old silent "nothing happened").
+  useEffect(()=>{if(!open)return;const stop=e=>{e.preventDefault();};window.addEventListener("dragover",stop);window.addEventListener("drop",stop);return()=>{window.removeEventListener("dragover",stop);window.removeEventListener("drop",stop);};},[open]);
   const useHere=async()=>{try{const {lat,lng}=await whereAmI();setF(p=>({...p,lat:lat.toFixed(6),lng:lng.toFixed(6)}));}catch{}};
   const addToList=async(field,files)=>{const ids=[];let gps=null;for(const file of [...files]){if(!file.type.startsWith("image/"))continue;if(field==="images"&&!gps){try{gps=await readExifGPS(file);}catch{}}try{ids.push(await putImage(await downscale(file)));}catch{}}if(ids.length||gps)setF(p=>{const next={...p,[field]:[...(p[field]||[]),...ids]};if(field==="images"&&gps&&!String(p.lat||"").trim()&&!String(p.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;});};
   const dropList=field=>async e=>{e.preventDefault();e.stopPropagation();const files=[...(e.dataTransfer.files||[])].filter(x=>x.type.startsWith("image/"));if(files.length)return addToList(field,files);let url=(e.dataTransfer.getData("text/uri-list")||"").split("\n").find(l=>l&&!l.startsWith("#"))||"";if(!url){const h=e.dataTransfer.getData("text/html")||"";const m=h.match(/<img[^>]+src=["']([^"']+)["']/i);if(m)url=m[1];}url=(url||"").trim();if(isImgUrl(url))setF(p=>({...p,[field]:[...(p[field]||[]),url]}));};
   const removeFrom=(field,v)=>setF(p=>({...p,[field]:(p[field]||[]).filter(x=>x!==v)}));
   const Strip=({field,label,hint})=><div style={{gridColumn:"1/3"}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><Label>{label}{(f[field]||[]).length?` · ${f[field].length}`:""}</Label><label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={14}/>Add</Btn><input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{addToList(field,e.target.files);e.target.value="";}}/></label></div>
-    <div onDragOver={e=>{e.preventDefault();e.stopPropagation();}} onDrop={dropList(field)} style={{border:`1px dashed ${c.line2}`,borderRadius:10,padding:10}}>
-      {(f[field]||[]).length===0?<div style={{fontFamily:UI,fontSize:12,color:c.t2,textAlign:"center",padding:"8px 0"}}>{hint}</div>:
+    <div onDragOver={e=>{e.preventDefault();e.stopPropagation();if(dragF!==field)setDragF(field);}} onDragLeave={e=>{if(e.currentTarget===e.target)setDragF("");}} onDrop={e=>{setDragF("");dropList(field)(e);}} style={{border:`1.5px dashed ${dragF===field?c.accent:c.line2}`,background:dragF===field?c.accentSoft:"transparent",borderRadius:10,padding:13,minHeight:62}}>
+      {(f[field]||[]).length===0?<div style={{fontFamily:UI,fontSize:12,color:dragF===field?c.accent:c.t2,textAlign:"center",padding:"10px 0"}}>{dragF===field?"Drop to add":hint}</div>:
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(72px,1fr))",gap:7}}>
           {(f[field]||[]).map(v=><div key={v} style={{position:"relative",aspectRatio:"1",borderRadius:8,overflow:"hidden",border:`1px solid ${c.line2}`}}><StoredImg id={v} style={{width:"100%",height:"100%",objectFit:"cover"}}/><button onClick={()=>removeFrom(field,v)} style={{position:"absolute",top:3,right:3,width:20,height:20,borderRadius:"50%",border:"none",background:"#000a",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"}}><X size={12}/></button></div>)}
         </div>}
@@ -1225,11 +1351,13 @@ function LocationEditor({open,init,tz,date,onClose,onSave,onDelete}){
     </div>}
   </Modal>;
 }
-function Locations({project,setProject,onOpen,openLightbox}){
+function Locations({project,setProject,onOpen,openLightbox,onToast}){
   const [ed,setEd]=useState(null);
+  const [dropId,setDropId]=useState("");
   const save=l=>setProject(p=>({...p,locations:l.id?p.locations.map(x=>x.id===l.id?l:x):[...p.locations,{...l,id:uid(),images:l.images||[],plans:l.plans||[]}]}));
   const del=id=>setProject(p=>({...p,locations:p.locations.filter(x=>x.id!==id),scenes:p.scenes.map(s=>s.locationId===id?{...s,locationId:""}:s)}));
-  return <div>
+  const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||""};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
+  return <div onDragOver={e=>{if([...(e.dataTransfer?.types||[])].includes("Files")){e.preventDefault();}}} onDrop={e=>{if([...(e.dataTransfer?.types||[])].includes("Files"))e.preventDefault();}}>
     <div style={{display:"flex",justifyContent:"flex-end",marginBottom:13}}><Btn kind="primary" size={12} onClick={()=>setEd({})}><Plus size={16}/>Location</Btn></div>
     {project.locations.length===0?<Empty icon={MapPin} title="No locations yet" body="Add the places you're shooting. Each gets sun direction, weather, travel time from base, a photo gallery, floor plans, and the scenes shot there." action={<Btn kind="primary" onClick={()=>setEd({})}><Plus size={16}/>Add location</Btn>}/>:
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:13}}>
@@ -1239,8 +1367,13 @@ function Locations({project,setProject,onOpen,openLightbox}){
           const hero=l.imgId||(l.images&&l.images[0])||"";
           const mapsHref=l.address?`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(l.address)}`:(l.lat?`https://www.google.com/maps/search/?api=1&query=${l.lat},${l.lng}`:null);
           const earthHref=l.lat?`https://earth.google.com/web/search/${l.lat},${l.lng}`:null;
-          return <div key={l.id} style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,overflow:"hidden"}}>
-            {hero?<StoredImg id={hero} style={{width:"100%",height:130,objectFit:"cover",display:"block",cursor:"zoom-in"}} onClick={async()=>openLightbox&&openLightbox(isImgUrl(hero)?hero:await store.get("pb:img:"+hero))}/>:<div style={{height:8}}/>}
+          const gallery=(l.images&&l.images.length?l.images:(hero?[hero]:[]));
+          return <div key={l.id}
+            onDragOver={e=>{if([...(e.dataTransfer?.types||[])].includes("Files")){e.preventDefault();e.stopPropagation();if(dropId!==l.id)setDropId(l.id);}}}
+            onDragLeave={e=>{if(e.currentTarget===e.target)setDropId("");}}
+            onDrop={e=>{e.preventDefault();e.stopPropagation();setDropId("");const files=[...(e.dataTransfer.files||[])].filter(x=>x.type.startsWith("image/"));if(files.length)addImagesToLoc(l.id,files);}}
+            style={{background:c.bg1,border:`1px solid ${dropId===l.id?c.accent:c.line}`,borderRadius:13,overflow:"hidden",outline:dropId===l.id?`2px dashed ${c.accent}`:"none",outlineOffset:-2}}>
+            {hero?<StoredImg id={hero} style={{width:"100%",height:130,objectFit:"cover",display:"block",cursor:"zoom-in"}} onClick={()=>openLightbox&&openLightbox(gallery,Math.max(0,gallery.indexOf(hero)))}/>:<div style={{height:8}}/>}
             <div style={{padding:14}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{l.name}</div>{l.address&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,marginTop:2}}>{l.address}</div>}</div><div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>{earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" title="Google Earth fly-around" style={{color:c.t2,display:"flex"}}><Compass size={16}/></a>}{mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" title="Maps" style={{color:c.t2,display:"flex"}}><MapPin size={16}/></a>}<IconBtn icon={Settings} size={16} dim onClick={()=>setEd(l)}/></div></div>
               <div style={{display:"flex",gap:10,margin:"10px 0",alignItems:"center",flexWrap:"wrap"}}>{l.lat&&<TravelChip meta={project.meta} lat={l.lat} lng={l.lng}/>}{l.lat&&<WeatherInline lat={l.lat} lng={l.lng} date={date}/>}{l.images&&l.images.length>0&&<Chip color={c.t2}><ImageIcon size={11}/>{l.images.length}</Chip>}{l.plans&&l.plans.length>0&&<Chip color={c.t2}>{l.plans.length} plan{l.plans.length>1?"s":""}</Chip>}</div>
@@ -1422,7 +1555,7 @@ function ImportPane({kind,project,setProject,onToast}){
     setBusy(false);setProg("");
   };
   const apply=()=>{
-    if(review.kind==="script"){setProject(p=>{let sc=attachRefs(applyScript(p.scenes,review.parsed),review.parsed);sc=linkLocations(sc,review.parsed,p.locations);return {...p,scenes:sc};});onToast(`Script merged · ${review.diff.added.length} new, ${review.diff.omitted.length} cut`);}
+    if(review.kind==="script"){setProject(p=>{let sc=attachRefs(applyScript(p.scenes,review.parsed),review.parsed);sc=linkLocations(sc,review.parsed,p.locations);const d=deriveLocations(sc,p.locations);return {...p,scenes:d.scenes,locations:d.locations};});onToast(`Script merged · ${review.diff.added.length} new, ${review.diff.omitted.length} cut`);}
     else{setProject(p=>({...p,scenes:applySchedule(p.scenes,review.days)}));onToast(`Schedule applied · ${review.diff.days} days`);}
     setReview(null);
   };
@@ -1774,7 +1907,7 @@ function ExportDoc({project}){
         </div>
         {l&&<div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:3}}>Location: {l.name}</div>}
         {s.syn&&<div style={{fontFamily:SERIF,fontSize:13.5,lineHeight:1.5,marginTop:8}}>{s.syn}</div>}
-        {s.scriptText&&<div style={{marginTop:8}}><span style={sub}>Script</span><pre style={{fontFamily:MONO,fontSize:10,lineHeight:1.4,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:"3px 0 0",color:P.text}}>{s.scriptText}</pre></div>}
+        {s.scriptText&&<div style={{marginTop:8}}><span style={sub}>Script</span><div style={{marginTop:3}}><ScreenplayText text={s.scriptText} base={P.text} strong={P.text} dim={P.muted} size={10}/></div></div>}
         {s.notes&&<div style={{marginTop:8}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12.5,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
         {s.shots.length>0&&<div style={{marginTop:8}}><span style={sub}>Shot list</span><div style={{marginTop:4}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12.5,lineHeight:1.55,display:"flex",gap:8}}><span style={{color:P.muted,fontFamily:MONO,fontSize:11,minWidth:34}}>{sh.done?"[x]":"[ ]"}</span><span>{i+1}. {sh.text}</span></div>)}</div></div>}
         {(()=>{const g=gearOf(s);return g.length?<div style={{marginTop:8}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const items=g.filter(x=>x.dept===d.k);return items.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {items.map(x=>x.name).join(", ")}</div>:null;})}</div></div>:null;})()}
@@ -1877,8 +2010,8 @@ function LookBoard({project,setProject,openLightbox,onToast}){
     <div onPaste={e=>{const fs=[...e.clipboardData.files];if(fs.length)addImages(fs);}} onDragOver={e=>{e.preventDefault();e.stopPropagation();if(!drag)setDrag(true);}} onDragLeave={e=>{if(e.currentTarget===e.target)setDrag(false);}} onDrop={onDrop} style={drag?{outline:`2px dashed ${c.accent}`,outlineOffset:4,borderRadius:12}:undefined}>
       {look.length===0?<Empty icon={ImageIcon} title="No look references yet" body="Drop the images that define the film's visual language. They live at the top level, across every scene."/>:
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
-          {look.map(id=><div key={id} style={{position:"relative",aspectRatio:"4/3",borderRadius:12,overflow:"hidden",border:`1px solid ${c.line2}`}}>
-            <StoredImg id={id} style={{width:"100%",height:"100%",objectFit:"cover",cursor:"zoom-in"}} onClick={async()=>openLightbox(isImgUrl(id)?id:await store.get("pb:img:"+id))}/>
+          {look.map((id,idx)=><div key={id} style={{position:"relative",aspectRatio:"4/3",borderRadius:12,overflow:"hidden",border:`1px solid ${c.line2}`}}>
+            <StoredImg id={id} style={{width:"100%",height:"100%",objectFit:"cover",cursor:"zoom-in"}} onClick={()=>openLightbox(look,idx)}/>
             <button onClick={()=>setLook(l=>l.filter(x=>x!==id))} style={{position:"absolute",top:6,right:6,width:24,height:24,borderRadius:"50%",border:"none",background:"#000a",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"}}><X size={14}/></button>
           </div>)}
         </div>}
@@ -1939,7 +2072,26 @@ export default function App(){
   const toastFn=useCallback((msg,action)=>setToast({msg,action,id:uid()}),[]);
   const patchScene=useCallback((number,patch)=>setProject(p=>({...p,scenes:p.scenes.map(s=>s.number===number?{...s,...patch}:s)})),[]);
   const tagGear=useCallback((number,name,dept)=>setProject(p=>{let g=p.gear.find(x=>x.name.toLowerCase()===name.toLowerCase()&&x.dept===dept),gear=p.gear;if(!g){g={id:uid(),name,dept};gear=[...p.gear,g];}return {...p,gear,scenes:p.scenes.map(s=>s.number===number?(s.gearTags.includes(g.id)?s:{...s,gearTags:[...s.gearTags,g.id]}):s)};}),[]);
+  const openLightbox=useCallback((items,i=0)=>setLight({items:(Array.isArray(items)?items:[items]).filter(Boolean),i}),[]);
+  const sendRefBetween=useCallback((fromN,imgId,toN,mode)=>setProject(p=>({...p,scenes:p.scenes.map(s=>{
+    if(s.number===toN)return s.refs.includes(imgId)?s:{...s,refs:[...s.refs,imgId]};
+    if(mode==="move"&&s.number===fromN)return {...s,refs:s.refs.filter(x=>x!==imgId)};
+    return s;
+  })})),[]);
   const themeChange=t=>{applyTheme(t);setTb(b=>b+1);};
+  // Global back/forward across screens: a history stack of {view,activeScene} snapshots.
+  const histRef=useRef({stack:[],idx:-1,nav:false});
+  const [,forceHist]=useState(0);
+  useEffect(()=>{
+    if(!project)return;const h=histRef.current;
+    if(h.nav){h.nav=false;forceHist(x=>x+1);return;}
+    const loc={view,activeScene},cur=h.stack[h.idx];
+    if(cur&&cur.view===loc.view&&cur.activeScene===loc.activeScene)return;
+    h.stack=h.stack.slice(0,h.idx+1);h.stack.push(loc);if(h.stack.length>120)h.stack.shift();h.idx=h.stack.length-1;forceHist(x=>x+1);
+  },[view,activeScene]);
+  const goBack=()=>{const h=histRef.current;if(h.idx<=0)return;h.idx--;h.nav=true;const l=h.stack[h.idx];setActiveScene(l.activeScene);setView(l.view);};
+  const goFwd=()=>{const h=histRef.current;if(h.idx>=h.stack.length-1)return;h.idx++;h.nav=true;const l=h.stack[h.idx];setActiveScene(l.activeScene);setView(l.view);};
+  const canBack=histRef.current.idx>0,canFwd=histRef.current.idx<histRef.current.stack.length-1;
 
   if(!project)return <div style={{position:"fixed",inset:0,background:c.bg0,display:"grid",placeItems:"center"}}><div style={{fontFamily:MONO,color:c.accent,fontSize:13}}>Loading deck…</div></div>;
 
@@ -1963,7 +2115,10 @@ export default function App(){
   const TopBar=(
     <div data-noprint style={{display:"flex",alignItems:"center",gap:10,padding:wide?"14px 22px":"11px 14px",borderBottom:`1px solid ${c.line}`,background:c.bg0,position:"sticky",top:0,zIndex:40}}>
       {!wide&&<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:24,height:24,borderRadius:6,background:c.accent,display:"grid",placeItems:"center"}}><Film size={14} color="#17120a"/></div></div>}
-      {view==="scene"&&<IconBtn icon={ChevronLeft} onClick={()=>setView("scenes")} dim title="Back"/>}
+      <div style={{display:"flex",gap:2}}>
+        <IconBtn icon={ArrowLeft} onClick={goBack} dim title="Back to last screen" style={{opacity:canBack?1:0.3,width:wide?40:34}}/>
+        <IconBtn icon={ArrowRight} onClick={goFwd} dim title="Forward" style={{opacity:canFwd?1:0.3,width:wide?40:34}}/>
+      </div>
       <div style={{fontFamily:UI,fontSize:wide?18:15,fontWeight:800,color:c.t0,letterSpacing:"-0.2px"}}>{view==="scene"?(curScene?`Scene ${curScene.number}`:"Scene"):(TITLES[view]||project.meta.title)}</div>
       <div style={{flex:1}}/>
       <IconBtn icon={Search} onClick={()=>setJump(true)} title="Jump to scene ( / or Cmd-K )" dim/>
@@ -1981,13 +2136,13 @@ export default function App(){
       {TopBar}
       <div style={{flex:1,padding:wide?"20px 22px":"15px 13px",paddingBottom:wide?40:90,overflowY:"auto",...(view==="scene"&&wide?{display:"flex",flexDirection:"column"}:{})}}>
         {view==="home"&&<Dashboard project={project} onOpen={openScene} onNav={setView}/>}
-        {view==="scene"&&curScene&&<SceneView scene={curScene} meta={project.meta} locations={project.locations} gearList={project.gear} wide={wide} patchScene={patch=>patchScene(curScene.number,patch)} openInk={setInk} openLightbox={setLight} addGear={(name,dept)=>tagGear(curScene.number,name,dept)} goScene={openScene} neighbors={neighbors} openInfo={()=>setInfo(curScene)} onToast={toastFn}/>}
+        {view==="scene"&&curScene&&<SceneView scene={curScene} scenes={project.scenes} meta={project.meta} locations={project.locations} gearList={project.gear} wide={wide} patchScene={patch=>patchScene(curScene.number,patch)} openInk={setInk} openLightbox={openLightbox} addGear={(name,dept)=>tagGear(curScene.number,name,dept)} goScene={openScene} neighbors={neighbors} openInfo={()=>setInfo(curScene)} onToast={toastFn} onSendRef={sendRefBetween}/>}
         {view==="scene"&&!curScene&&<Empty icon={Film} title="Scene not found" body="It may have been cut. Open the Scenes list." action={<Btn kind="primary" onClick={()=>setView("scenes")}>Scenes</Btn>}/>}
         {view==="scenes"&&<><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}><Btn kind="ghost" size={12} onClick={()=>setInfo({__new:true,status:"todo"})}><Plus size={15}/>Add scene</Btn></div><Library project={project} lens={lens} onOpen={openScene}/></>}
-        {view==="look"&&<LookBoard project={project} setProject={setProject} openLightbox={setLight} onToast={toastFn}/>}
+        {view==="look"&&<LookBoard project={project} setProject={setProject} openLightbox={openLightbox} onToast={toastFn}/>}
         {view==="days"&&<Days project={project} onOpen={openScene}/>}
         {view==="capture"&&<Capture project={project} setProject={setProject} onFiled={()=>{}} onToast={toastFn}/>}
-        {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={setLight}/>}
+        {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn}/>}
         {view==="crew"&&<Crew project={project} setProject={setProject}/>}
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
         {view==="contacts"&&<Contacts project={project} setProject={setProject}/>}
@@ -2017,7 +2172,7 @@ export default function App(){
 
     <QuickJump open={jump} scenes={project.scenes} onClose={()=>setJump(false)} onOpen={openScene}/>
     {ink&&<InkCanvas title={ink.title} bgUrl={ink.bgUrl} initial={ink.initial} onClose={()=>setInk(null)} onSave={d=>{ink.onSave&&ink.onSave(d);}}/>}
-    <Lightbox src={light} onClose={()=>setLight(null)}/>
+    <Lightbox state={light} onClose={()=>setLight(null)}/>
     <SceneInfo open={!!info} init={info} locations={project.locations} onClose={()=>setInfo(null)} onSave={saveInfo} onDelete={delScene}/>
     <Toast toast={toast} onClose={()=>setToast(null)}/>
   </div>;
