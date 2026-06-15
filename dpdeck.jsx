@@ -267,8 +267,16 @@ async function r2Read(name){
   const t=(await res.text()).trim();
   return t||null;
 }
+/* in-app AI: uses the user's OWN Anthropic key, stored locally (pb:aikey) on this device,
+   called direct from the browser. No key in code, no server. Empty key = AI buttons stay off;
+   the paste-JSON and Load Project paths never need it. */
+let AI_KEY="";
+async function loadAIKey(){try{AI_KEY=(await store.get("pb:aikey"))||"";}catch{AI_KEY="";}}
+function setAIKey(k){AI_KEY=(k||"").trim();return store.set("pb:aikey",AI_KEY);}
+const aiHeaders=()=>({"content-type":"application/json","x-api-key":AI_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"});
 async function callClaude(prompt,maxTokens=8000){
-  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:maxTokens,messages:[{role:"user",content:prompt}]})});
+  if(!AI_KEY)throw new Error("Add your Anthropic API key in Settings to use the in-app AI.");
+  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:aiHeaders(),body:JSON.stringify({model:MODEL,max_tokens:maxTokens,messages:[{role:"user",content:prompt}]})});
   if(!res.ok)throw new Error("AI request failed ("+res.status+")");
   const data=await res.json();
   return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
@@ -874,9 +882,10 @@ function GearBlock({scene,gearList,addGear,patchScene}){
 /* AI filing + geolocation helpers (capture) */
 function extractObj(raw){let s=(raw||"").replace(/```json/gi,"").replace(/```/g,"").trim();const a=s.indexOf("{"),b=s.lastIndexOf("}");if(a<0||b<0)throw new Error("No JSON object");return JSON.parse(s.slice(a,b+1));}
 async function callClaudeVision(prompt,dataUrl,maxTokens=500){
-  const m=/^data:(.*?);base64,(.*)$/.exec(dataUrl||"");const content=[{type:"text",text:prompt}];
+  if(!AI_KEY)throw new Error("Add your Anthropic API key in Settings to use the in-app AI.");
+  const m=(dataUrl||"").match(/^data:(.*?);base64,(.*)$/);const content=[{type:"text",text:prompt}];
   if(m)content.unshift({type:"image",source:{type:"base64",media_type:m[1],data:m[2]}});
-  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:maxTokens,messages:[{role:"user",content}]})});
+  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:aiHeaders(),body:JSON.stringify({model:MODEL,max_tokens:maxTokens,messages:[{role:"user",content}]})});
   if(!res.ok)throw new Error("AI request failed");const d=await res.json();return (d.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
 }
 function sceneDigest(scenes){return scenes.filter(s=>s.status!=="omitted").map(s=>`${s.number} | ${s.slug} ${s.set} | ${s.dayNight} | ${(s.syn||"").slice(0,90)}`).join("\n");}
@@ -1622,6 +1631,8 @@ function Import({project,setProject,onToast}){
 function SettingsView({project,setProject,onToast,onThemeChange}){
   const m=project.meta;const set=(k,v)=>setProject(p=>({...p,meta:{...p.meta,[k]:v}}));
   const [wipe,setWipe]=useState(false);
+  const [aikey,setAikey]=useState("");
+  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));},[]);
   const useHere=async()=>{try{const {lat,lng}=await whereAmI();setProject(p=>({...p,meta:{...p.meta,baseLat:lat.toFixed(6),baseLng:lng.toFixed(6)}}));onToast("Base set to current location");}catch{onToast("Couldn't get location");}};
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     <Card title="Film" icon={Film}>
@@ -1637,6 +1648,13 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
     </Card>
     <Card title="Appearance" icon={c.bg0===DARK.bg0?MoonStar:SunMedium}>
       <Segmented value={m.theme||"dark"} onChange={v=>{const t=v||"dark";set("theme",t);onThemeChange(t);}} options={[{k:"dark",label:"Dark (set)"},{k:"light",label:"Light (day)"}]}/>
+    </Card>
+    <Card title="In-app AI (optional)" icon={Sparkles}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>Paste your own Anthropic API key to turn on the in-app "parse PDF" and gear "Suggest" buttons. It is stored only on this device and sent straight to Anthropic from your browser, never to the repo or a server. Importing works fine without it (Paste JSON or Load project file).</div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <TextInput type="password" value={aikey} placeholder="sk-ant-..." autoComplete="off" onChange={e=>setAikey(e.target.value)}/>
+        <Btn kind="primary" size={12} onClick={async()=>{await setAIKey(aikey.trim());onToast(aikey.trim()?"AI key saved on this device":"AI key cleared");}}>Save</Btn>
+      </div>
     </Card>
     <Card title="Data" icon={Settings}>
       <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:12}}>{HAS?"Your deck is saved locally in this browser (IndexedDB), set to persistent so the browser will not evict it. Download a full backup to guard against loss and to move the whole deck to another device (restore it there).":"Heads up: persistent storage isn't available here, so this session won't be saved."}</div>
@@ -1863,6 +1881,7 @@ export default function App(){
 
   useEffect(()=>{(async()=>{
     try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
+    loadAIKey();
     let p=await store.get("pb:project");
     if(!p||typeof p!=="object"){p=DEFAULT_PROJECT();}
     p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};p.scenes=(p.scenes||[]).map(s=>({...emptyScene(s.number),...s}));p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];
