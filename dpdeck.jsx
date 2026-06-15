@@ -942,8 +942,9 @@ function ScreenplayText({text,base,strong,dim,size=12.5}){
 /* Full-frame parsed script for the CURRENT scene (not the ground-truth PDF) — a clean,
    large, centered read of this scene's screenplay text. */
 function ScriptFull({scene,onClose}){
-  useEffect(()=>{const h=e=>{if(e.key==="Escape")onClose();};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[onClose]);
-  return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:96,display:"flex",flexDirection:"column"}}>
+  const closeRef=useRef(onClose);closeRef.current=onClose;
+  useEffect(()=>{const h=e=>{if(e.key==="Escape")closeRef.current();};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
+  return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:97,display:"flex",flexDirection:"column"}}>
     <div style={{display:"flex",alignItems:"center",gap:9,padding:"12px 16px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
       <span style={{fontFamily:MONO,fontSize:18,fontWeight:700,color:c.accent}}>{scene.number}</span>
       {scene.slug&&<Tag label={scene.slug} color={slugColor(scene.slug)}/>}
@@ -2423,15 +2424,18 @@ export default function App(){
       {wide&&view==="scene"&&curScene?(
         <>
           {/* merged scene bar: identity + status + nav, freeing the column space the old InfoStrip took */}
-          <span style={{fontFamily:MONO,fontSize:20,fontWeight:700,color:c.accent,letterSpacing:"-0.5px"}}>{curScene.number}</span>
+          <span style={{fontFamily:MONO,fontSize:20,fontWeight:700,color:c.accent,letterSpacing:"-0.5px",flexShrink:0}}>{curScene.number}</span>
           {curScene.slug&&<Tag label={curScene.slug} color={slugColor(curScene.slug)}/>}
           {curScene.dayNight&&<Tag label={curScene.dayNight} color={dnColor(curScene.dayNight)}/>}
           {curScene.eighths>0&&<Tag label={fmtEighths(curScene.eighths)+" pg"} color={c.t2}/>}
           <StatusPill status={curScene.status==="omitted"?"todo":curScene.status} onCycle={sceneCycle}/>
           {curScene.shootDay?<Chip color={c.accent} active><Calendar size={11}/>Day {curScene.shootDay}{curScene.shootOrder?` · #${curScene.shootOrder}`:""}</Chip>:<Chip color={c.t2}>unscheduled</Chip>}
-          {sbLoc&&<Chip color={c.t1} onClick={()=>openScene("__loc__"+sbLoc.id)}><MapPin size={11}/>{sbLoc.name}</Chip>}
-          <div style={{flex:1}}/>
-          {neighbors&&<div style={{display:"flex",gap:4}}><IconBtn icon={ChevronLeft} size={18} onClick={()=>neighbors.prev&&openScene(neighbors.prev)} dim title="Previous scene" style={{opacity:neighbors.prev?1:0.3}}/><IconBtn icon={ChevronRight} size={18} onClick={()=>neighbors.next&&openScene(neighbors.next)} dim title="Next scene" style={{opacity:neighbors.next?1:0.3}}/></div>}
+          {sbLoc&&<Chip color={c.t1} onClick={()=>openScene("__loc__"+sbLoc.id)}><MapPin size={11}/>{sbLoc.name.length>24?sbLoc.name.slice(0,23)+"…":sbLoc.name}</Chip>}
+          <div style={{flex:1,minWidth:6}}/>
+          <div style={{display:"flex",flexShrink:0,borderRadius:8,overflow:"hidden",border:`1px solid ${c.line2}`}}>
+            {[{k:"story",l:"Story"},{k:"shoot",l:"Shoot"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} title={o.k==="story"?"Story order":"Shooting order — sets prev/next order"} style={{padding:"6px 10px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:11.5,fontWeight:700,cursor:"pointer"}}>{o.l}</button>)}
+          </div>
+          {neighbors&&<div style={{display:"flex",gap:4,flexShrink:0}}><IconBtn icon={ChevronLeft} size={18} onClick={()=>neighbors.prev&&openScene(neighbors.prev)} dim title="Previous scene" style={{opacity:neighbors.prev?1:0.3}}/><IconBtn icon={ChevronRight} size={18} onClick={()=>neighbors.next&&openScene(neighbors.next)} dim title="Next scene" style={{opacity:neighbors.next?1:0.3}}/></div>}
           <IconBtn icon={Settings} onClick={()=>setInfo(curScene)} dim title="Edit scene info"/>
           <IconBtn icon={Search} onClick={()=>setJump(true)} title="Jump ( / or Cmd-K )" dim/>
         </>
@@ -2444,7 +2448,7 @@ export default function App(){
           </div>}
         </>
       )}
-      {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error — will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
+      {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error — will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
         {sync.state==="syncing"||sync.state==="pending"?<RefreshCw size={15} color={c.accent}/>:sync.state==="error"?<Cloud size={15}/>:<CheckCircle2 size={15} color={c.ok}/>}
         {wide&&<span>{sync.state==="syncing"||sync.state==="pending"?"Syncing":sync.state==="error"?"Sync off":"Synced"}</span>}
       </div>}
