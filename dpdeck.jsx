@@ -180,7 +180,13 @@ async function exportFullBackup(){
   const legacyPdf=await store.get("pb:scriptpdf");if(legacyPdf&&!data["pb:doc:script"]){data["pb:scriptpdf"]=legacyPdf;const n=await store.get("pb:scriptpdfname");if(n)data["pb:scriptpdfname"]=n;}
   return {dpdeckBackup:1,ts:Date.now(),data};
 }
-async function importFullBackup(obj){if(!obj||obj.dpdeckBackup!==1||!obj.data)throw new Error("Not a DP Deck backup file.");for(const [k,v] of Object.entries(obj.data)){await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}}
+async function importFullBackup(obj){
+  if(!obj||obj.dpdeckBackup!==1||!obj.data||!obj.data["pb:project"])throw new Error("Not a DP Deck backup file.");
+  // Write everything except the project first, then the project LAST — so a mid-import failure
+  // (e.g. storage quota) leaves the previous deck intact rather than half-overwritten.
+  for(const [k,v] of Object.entries(obj.data)){if(k==="pb:project")continue;await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}
+  await store.set("pb:project",obj.data["pb:project"]);
+}
 
 /* ---- utils ------------------------------------------------------- */
 const uid=()=>Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3);
@@ -467,7 +473,7 @@ function diffSchedule(existing,days){
 }
 const uniq=a=>[...new Set((a||[]).filter(Boolean))];
 function applyLocations(existing,incoming){
-  const out=existing.map(x=>({...x}));
+  const out=(existing||[]).map(x=>({...x}));
   const byName=new Map(out.map((l,i)=>[(l.name||"").trim().toLowerCase(),i]));
   let added=0,updated=0;
   for(const inc of incoming){
@@ -483,7 +489,7 @@ function applyLocations(existing,incoming){
   return {merged:out,added,updated};
 }
 function linkLocations(scenes,parsed,locations){
-  if(!locations.length||!parsed.length)return scenes;
+  if(!locations?.length||!parsed.length)return scenes;
   const byName=new Map(locations.map(l=>[(l.name||"").trim().toLowerCase(),l.id]));
   const want=new Map();
   for(const p of parsed){const nm=((p.loc||p.set||"")+"").trim().toLowerCase();if(!nm)continue;const id=byName.get(nm);if(id)want.set(numKey(p.number),id);}
@@ -942,7 +948,8 @@ function ScreenplayText({text,base,strong,dim,size=12.5}){
 /* Full-frame parsed script for the CURRENT scene (not the ground-truth PDF) — a clean,
    large, centered read of this scene's screenplay text. */
 function ScriptFull({scene,onClose}){
-  const closeRef=useRef(onClose);closeRef.current=onClose;
+  const closeRef=useRef(onClose);
+  useEffect(()=>{closeRef.current=onClose;},[onClose]);
   useEffect(()=>{const h=e=>{if(e.key==="Escape")closeRef.current();};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
   return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:97,display:"flex",flexDirection:"column"}}>
     <div style={{display:"flex",alignItems:"center",gap:9,padding:"12px 16px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
@@ -2248,7 +2255,7 @@ const DEFAULT_PROJECT=()=>({meta:{title:"Untitled Film",baseName:"",baseLat:"",b
 function normalizeProject(p){
   if(!p||typeof p!=="object")p=DEFAULT_PROJECT();
   p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};
-  p.scenes=(p.scenes||[]).map(s=>({...emptyScene(s.number),...s}));
+  p.scenes=(p.scenes||[]).map(s=>{const m={...emptyScene(s.number),...s};for(const k of ["refs","shots","gearTags","sketches","aiGear"])if(!Array.isArray(m[k]))m[k]=[];return m;});
   p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));
   p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};
   p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];p.lookNotes=p.lookNotes||"";
@@ -2333,7 +2340,7 @@ export default function App(){
       try{
         const meta=await remoteDeckMeta();
         const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
-        if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>localMtime){
+        if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>localMtime&&!dirty.current){
           pulling.current=true;setSync({state:"syncing",at:Date.now()});
           await pullDeckFromCloud();
           skipPush.current=true;setProject(normalizeProject(await store.get("pb:project")));setTb(b=>b+1);
