@@ -173,7 +173,7 @@ async function exportFullBackup(){
   const sketchIds=new Set();
   for(const s of p.scenes||[])for(const id of s.sketches||[])sketchIds.add(id);
   for(const id of sketchIds){const sk=await store.get("pb:sketch:"+id);if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId))imgIds.add(sk.bgImgId);}}
-  for(const id of imgIds){const v=await store.get("pb:img:"+id);if(v)data["pb:img:"+id]=v;}
+  for(const id of imgIds){const v=await store.get("pb:img:"+id);if(v)data["pb:img:"+id]=v;const f=await store.get("pb:imgfull:"+id);if(f)data["pb:imgfull:"+id]=f;}
   for(const k of (await store.list())){if(String(k).startsWith("pb:scriptink:"))data[k]=await store.get(k);}
   // Ground-truth document PDFs (script + schedule) ride the deck so they sync across devices.
   for(const slot of ["script","schedule"]){const d=await store.get("pb:doc:"+slot);if(d){data["pb:doc:"+slot]=d;const n=await store.get("pb:doc:"+slot+"name");if(n)data["pb:doc:"+slot+"name"]=n;}}
@@ -341,6 +341,17 @@ async function r2Read(name){
 }
 async function r2ReadRaw(key){const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(res.status===404)return null;if(!res.ok)throw new Error("cloud "+res.status);return await res.text();}
 async function r2Write(key,text){const res=await fetch(R2_BASE+"/write/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"PUT",headers:{...(r2Headers()||{}),"Content-Type":"application/json"},body:text});if(!res.ok)throw new Error("cloud write "+res.status);return true;}
+/* Location photos use a hybrid store: a small thumbnail is embedded in the deck (works offline),
+   and the full-resolution image lives as its own R2 object under pb:imgfull:{id}. The Lightbox
+   fetches the full (authed) on demand and falls back to the embedded thumb offline. */
+const fullUrlCache=new Map();
+async function fullImageURL(id){
+  if(typeof id!=="string"||isImgUrl(id))return null;
+  if(fullUrlCache.has(id))return fullUrlCache.get(id);
+  let key=null;try{key=await store.get("pb:imgfull:"+id);}catch{}
+  if(!key){fullUrlCache.set(id,null);return null;}
+  try{const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(!res.ok)throw new Error("full "+res.status);const u=URL.createObjectURL(await res.blob());fullUrlCache.set(id,u);return u;}catch{return null;}
+}
 async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();const s=JSON.stringify(b);await r2Write(DECK_KEY,s);try{await r2Write(DECK_META,JSON.stringify({ts:b.ts}));}catch{}await store.set("pb:synced_ts",b.ts);await store.set("pb:project_mtime",b.ts);try{await writeDailySnapshot(s,b.ts);}catch{}return s.length;}
 async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");const o=JSON.parse(t);await importFullBackup(o);await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());return o.ts||0;}
 async function r2Delete(key){try{const res=await fetch(R2_BASE+"/delete/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"DELETE",headers:r2Headers()});return res.ok;}catch{return false;}}
@@ -832,9 +843,11 @@ function TravelChip({meta,lat,lng}){
 function Lightbox({state,onClose}){
   const items=state&&state.items&&state.items.length?state.items:null;
   const [i,setI]=useState(0);
+  const [fullSrc,setFullSrc]=useState(null);
   const touch=useRef(null);
   useEffect(()=>{if(state)setI(clamp(state.i||0,0,(state.items?.length||1)-1));},[state]);
   useEffect(()=>{if(!items)return;const h=e=>{if(e.key==="Escape")onClose();else if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();setI(x=>Math.min(x+1,items.length-1));}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();setI(x=>Math.max(x-1,0));}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[items,onClose]);
+  useEffect(()=>{let on=true;setFullSrc(null);const its=state&&state.items?state.items.filter(Boolean):null;if(its&&its.length)fullImageURL(its[clamp(i,0,its.length-1)]).then(u=>{if(on)setFullSrc(u);});return()=>{on=false;};},[state,i]);
   if(!items)return null;
   const idx=clamp(i,0,items.length-1),id=items[idx],many=items.length>1;
   const go=(d,e)=>{e&&e.stopPropagation();setI(x=>clamp(x+d,0,items.length-1));};
@@ -843,7 +856,7 @@ function Lightbox({state,onClose}){
   const te=e=>{if(touch.current==null)return;const dx=e.changedTouches[0].clientX-touch.current;touch.current=null;if(Math.abs(dx)>45)go(dx<0?1:-1);};
   return <div onClick={onClose} onTouchStart={ts} onTouchEnd={te} style={{position:"fixed",inset:0,background:"#000e",zIndex:95,display:"flex",alignItems:"center",justifyContent:"center",padding:"calc(16px + env(safe-area-inset-top)) 16px"}}>
     <div onClick={e=>e.stopPropagation()} style={{maxWidth:"100%",maxHeight:"100%",display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <StoredImg id={id} style={{maxWidth:"100%",maxHeight:"86vh",objectFit:"contain",borderRadius:8,display:"block"}}/>
+      {fullSrc?<img src={fullSrc} alt="" style={{maxWidth:"100%",maxHeight:"86vh",objectFit:"contain",borderRadius:8,display:"block"}}/>:<StoredImg id={id} style={{maxWidth:"100%",maxHeight:"86vh",objectFit:"contain",borderRadius:8,display:"block"}}/>}
     </div>
     <IconBtn icon={X} onClick={onClose} size={20} style={{position:"absolute",top:16,right:16}}/>
     {many&&<>
