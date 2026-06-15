@@ -641,6 +641,33 @@ async function getDocPageImage(slot,n){
   d.pageCache.set(n,r);return r;
 }
 async function getScriptPageImage(n){return getDocPageImage("script",n);}
+/* Robust scene -> PDF page map: scan the ACTUAL script PDF text for each scene's heading
+   ("<number> INT/EXT ...") and record the physical page it appears on. No page-offset math,
+   no reliance on parsed pageStart — the scene is located in the PDF itself. Built once, cached. */
+let _spi=null,_spiDoc=null,_spiBuilding=null;
+async function scriptPageIndex(validNums){
+  const doc=docs.script.doc; if(!doc)return null;
+  if(_spi&&_spiDoc===doc)return _spi;
+  if(_spiBuilding)return _spiBuilding;
+  _spiBuilding=(async()=>{
+    const map=new Map();
+    const valid=validNums&&validNums.length?new Set(validNums.map(x=>String(x).toUpperCase())):null;
+    for(let n=1;n<=doc.numPages;n++){
+      let txt=""; try{txt=await pdfPageText(doc,n);}catch{}
+      for(const ln of txt.split("\n")){
+        // a heading line starts with the scene number and contains INT/EXT somewhere
+        // (covers both "16 INT. ..." and "16 ELISHA'S NOTEBOOK - INT. ..." style headings)
+        const m=ln.match(/^\s*(\d{1,3}[A-Za-z]?)\b/);
+        if(!m||!/\b(?:INT|EXT|I\/E)\b/i.test(ln))continue;
+        const num=m[1].toUpperCase();
+        if(valid&&!valid.has(num))continue;
+        if(!map.has(num))map.set(num,n);
+      }
+    }
+    _spi=map;_spiDoc=doc;_spiBuilding=null;return map;
+  })();
+  return _spiBuilding;
+}
 
 /* ---- guess page ranges from text positions (fallback aid) -------- */
 async function scriptPagesText(doc,onProgress){
@@ -980,17 +1007,28 @@ function ScriptFull({scene,onClose}){
 }
 
 /* ---- script pages for one scene --------------------------------- */
-function ScriptPages({scene,bump,onMark,off=0}){
+function ScriptPages({scene,bump,onMark,off=0,sceneNums}){
   const [pages,setPages]=useState(null);
   const ready=!!scriptDoc.doc;
   useEffect(()=>{let on=true;(async()=>{
-    if(!scriptDoc.doc||!scene.pageStart){setPages([]);return;}
-    const ink=await loadScriptInk(scene.number);const out=[];const np=scriptDoc.doc?.numPages||9999;
-    // pageStart is the screenplay's PRINTED page number; the PDF has front matter (a title page),
-    // so render the PHYSICAL pdf.js page = printed + off. Label/ink stay keyed to the printed page.
-    for(let n=scene.pageStart;n<=(scene.pageEnd||scene.pageStart);n++){try{const img=await getScriptPageImage(Math.min(n+off,np));if(img)out.push({n,url:img.url,aspect:img.w/img.h,ink:ink[n]});}catch{}}
+    const doc=scriptDoc.doc; if(!doc){setPages([]);return;}
+    const np=doc.numPages;
+    // Anchor to the REAL scene heading found in the PDF text (per scene number), not a page offset.
+    const idx=await scriptPageIndex(sceneNums); if(!on)return;
+    const key=String(scene.number||"").toUpperCase();
+    let start=null,end=null;
+    if(idx&&idx.has(key)){
+      start=idx.get(key);
+      const nexts=[...idx.values()].filter(v=>v>start).sort((a,b)=>a-b);
+      end=Math.min(nexts.length?nexts[0]-1:np, start+6, np); // scene spans from its page to the next scene's page
+    }else if(scene.pageStart){ // fallback: printed page + title-page offset
+      start=Math.min(scene.pageStart+off,np); end=Math.min((scene.pageEnd||scene.pageStart)+off,np);
+    }
+    if(start==null){setPages([]);return;}
+    const ink=await loadScriptInk(scene.number);const out=[];
+    for(let n=start;n<=end;n++){try{const img=await getScriptPageImage(n);if(img)out.push({n,url:img.url,aspect:img.w/img.h,ink:ink[n]});}catch{}}
     if(on)setPages(out);
-  })();return()=>{on=false;};},[scene.number,scene.pageStart,scene.pageEnd,ready,bump,off]);
+  })();return()=>{on=false;};},[scene.number,scene.pageStart,scene.pageEnd,ready,bump,off,sceneNums]);
   return <div style={{display:"flex",flexDirection:"column",gap:13}}>
     <div>
       <div style={{display:"flex",gap:7,alignItems:"center",marginBottom:7,flexWrap:"wrap"}}>
@@ -1030,6 +1068,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
   const [bump,setBump]=useState(0),[drag,setDrag]=useState(false),[pickBg,setPickBg]=useState(false),[sendImg,setSendImg]=useState(null),[scriptFull,setScriptFull]=useState(false);
   const fileRef=useRef(null),camRef=useRef(null);
   const loc=locations.find(l=>l.id===scene.locationId);
+  const sceneNums=useMemo(()=>scenes.map(s=>s.number),[scenes]);
   const plans=loc?.plans||[];
   const cycle=()=>{const i=STATUS.findIndex(x=>x.k===scene.status);patchScene({status:STATUS[(i+1)%STATUS.length].k});};
   const addImages=async(files)=>{const ids=[];for(const f of files){if(!f.type.startsWith("image/"))continue;try{ids.push(await putImage(await downscale(f)));}catch{}}if(ids.length)patchScene({refs:[...scene.refs,...ids]});};
@@ -1086,7 +1125,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
 
   const Script=<PanelShell wide={wide} title="Script" icon={<FileText size={14} color={c.accent}/>}
     action={scene.scriptText&&<IconBtn icon={Maximize2} size={17} dim title="Full-screen script for this scene" onClick={()=>setScriptFull(true)}/>}>
-    <ScriptPages scene={scene} bump={bump} onMark={markPage} off={+(meta?.scriptPageOffset||0)}/>
+    <ScriptPages scene={scene} bump={bump} onMark={markPage} off={+(meta?.scriptPageOffset||0)} sceneNums={sceneNums}/>
   </PanelShell>;
 
   const Reference=<PanelShell wide={wide} title={`Reference${scene.refs.length?` · ${scene.refs.length}`:""}`} icon={<ImageIcon size={14} color={c.accent}/>}
