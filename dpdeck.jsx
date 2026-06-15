@@ -5,7 +5,7 @@ import {
   Inbox, Sun, Sunrise, Sunset, CloudSun, Cloud, CloudRain, CloudSnow, CloudFog,
   CloudDrizzle, CloudLightning, Navigation, Phone, Mail, Volume2, Settings,
   MoonStar, SunMedium, Sparkles, Clock, ListChecks, Compass, Maximize2, CloudDownload, Home, Printer,
-  ArrowLeft, ArrowRight, Copy, Send,
+  ArrowLeft, ArrowRight, Copy, Send, GripVertical, BookOpen, RefreshCw, CheckCircle2,
 } from "lucide-react";
 import { get as idbGet, set as idbSet, del as idbDel, keys as idbKeys, createStore as idbCreateStore } from "idb-keyval";
 
@@ -139,7 +139,9 @@ async function exportFullBackup(){
   for(const id of sketchIds){const sk=await store.get("pb:sketch:"+id);if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId))imgIds.add(sk.bgImgId);}}
   for(const id of imgIds){const v=await store.get("pb:img:"+id);if(v)data["pb:img:"+id]=v;}
   for(const k of (await store.list())){if(String(k).startsWith("pb:scriptink:"))data[k]=await store.get(k);}
-  const pdf=await store.get("pb:scriptpdf");if(pdf){data["pb:scriptpdf"]=pdf;const n=await store.get("pb:scriptpdfname");if(n)data["pb:scriptpdfname"]=n;}
+  // Ground-truth document PDFs (script + schedule) ride the deck so they sync across devices.
+  for(const slot of ["script","schedule"]){const d=await store.get("pb:doc:"+slot);if(d){data["pb:doc:"+slot]=d;const n=await store.get("pb:doc:"+slot+"name");if(n)data["pb:doc:"+slot+"name"]=n;}}
+  const legacyPdf=await store.get("pb:scriptpdf");if(legacyPdf&&!data["pb:doc:script"]){data["pb:scriptpdf"]=legacyPdf;const n=await store.get("pb:scriptpdfname");if(n)data["pb:scriptpdfname"]=n;}
   return {dpdeckBackup:1,ts:Date.now(),data};
 }
 async function importFullBackup(obj){if(!obj||obj.dpdeckBackup!==1||!obj.data)throw new Error("Not a DP Deck backup file.");for(const [k,v] of Object.entries(obj.data)){await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}}
@@ -284,6 +286,8 @@ function setR2Key(k){R2_KEY=(k||"").trim();return store.set("pb:r2key",R2_KEY);}
 const r2Headers=()=>R2_KEY?{"X-API-Key":R2_KEY}:undefined;
 const R2_KEYS={script:"dpdeck/script.json",schedule:"dpdeck/schedule.json",locations:"dpdeck/locations.json",crew:"dpdeck/crew.json",contacts:"dpdeck/contacts.json"};
 const DECK_KEY="dpdeck/_deck.json"; // full lossless deck snapshot for cross-device sync
+const DECK_META="dpdeck/_deckmeta.json"; // tiny {ts} so a device can check freshness without pulling the whole deck
+async function remoteDeckMeta(){try{const t=await r2ReadRaw(DECK_META);return t?JSON.parse(t):null;}catch{return null;}}
 async function r2Read(name){
   const key=R2_KEYS[name];if(!key)return null;
   const res=await fetch(R2_BASE+"/read/"+key,{headers:r2Headers()});
@@ -295,8 +299,8 @@ async function r2Read(name){
 }
 async function r2ReadRaw(key){const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(res.status===404)return null;if(!res.ok)throw new Error("cloud "+res.status);return await res.text();}
 async function r2Write(key,text){const res=await fetch(R2_BASE+"/write/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"PUT",headers:{...(r2Headers()||{}),"Content-Type":"application/json"},body:text});if(!res.ok)throw new Error("cloud write "+res.status);return true;}
-async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();await r2Write(DECK_KEY,JSON.stringify(b));return JSON.stringify(b).length;}
-async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");await importFullBackup(JSON.parse(t));return true;}
+async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();const s=JSON.stringify(b);await r2Write(DECK_KEY,s);try{await r2Write(DECK_META,JSON.stringify({ts:b.ts}));}catch{}await store.set("pb:synced_ts",b.ts);await store.set("pb:project_mtime",b.ts);return s.length;}
+async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");const o=JSON.parse(t);await importFullBackup(o);await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());return o.ts||0;}
 /* in-app AI: uses the user's OWN Anthropic key, stored locally (pb:aikey) on this device,
    called direct from the browser. No key in code, no server. Empty key = AI buttons stay off;
    the paste-JSON and Load Project paths never need it. */
@@ -516,22 +520,39 @@ function applyProjectFile(p,inc){
   return out;
 }
 
-/* ---- session script document (for page rendering) --------------- */
-const scriptDoc={doc:null,pageCache:new Map(),name:""};
-async function setScriptPDF(ab,name){
-  let persist=null;try{persist=ab.slice(0);}catch{}
-  scriptDoc.doc=await pdfFromArrayBuffer(ab);scriptDoc.pageCache.clear();scriptDoc.name=name||"script.pdf";
-  // persist a copy if small enough to re-render next session
-  try{if(persist){const b=new Uint8Array(persist);if(b.byteLength<4_500_000){let bin="";for(let i=0;i<b.length;i++)bin+=String.fromCharCode(b[i]);await store.set("pb:scriptpdf",btoa(bin));await store.set("pb:scriptpdfname",name||"");}else{await store.del("pb:scriptpdf");}}}catch{}
+/* ---- document store: ground-truth PDFs (script + schedule) ------- */
+/* Both ride the deck (pb:doc:{slot} base64) so they sync across devices and never need a
+   per-device import. The script slot also drives per-scene page rendering (scriptDoc alias). */
+const docs={script:{doc:null,name:"",pageCache:new Map()},schedule:{doc:null,name:"",pageCache:new Map()}};
+const scriptDoc=docs.script;
+const DOC_LABEL={script:"Script",schedule:"Schedule"};
+function abToB64(ab){const b=new Uint8Array(ab);let bin="";const CH=0x8000;for(let i=0;i<b.length;i+=CH)bin+=String.fromCharCode.apply(null,b.subarray(i,i+CH));return btoa(bin);}
+function b64ToU8(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}
+async function saveDoc(slot,ab,name){
+  // Persist bytes first so the document survives + syncs even if pdf.js parsing hiccups.
+  try{await store.set("pb:doc:"+slot,abToB64(ab));await store.set("pb:doc:"+slot+"name",name||"");}catch{}
+  docs[slot].name=name||DOC_LABEL[slot];
+  try{docs[slot].doc=await pdfFromArrayBuffer(ab);docs[slot].pageCache.clear();}catch{}
 }
-async function restoreScriptPDF(){
-  try{const b64=await store.get("pb:scriptpdf");if(!b64)return false;const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);scriptDoc.doc=await pdfFromArrayBuffer(u.buffer);scriptDoc.name=await store.get("pb:scriptpdfname")||"script.pdf";return true;}catch{return false;}
+async function ensureDoc(slot){
+  if(docs[slot].doc)return docs[slot].doc;
+  try{
+    let b64=await store.get("pb:doc:"+slot);
+    if(!b64&&slot==="script")b64=await store.get("pb:scriptpdf"); // legacy
+    if(!b64)return null;
+    docs[slot].doc=await pdfFromArrayBuffer(b64ToU8(b64).buffer);
+    docs[slot].name=(await store.get("pb:doc:"+slot+"name"))||(slot==="script"?(await store.get("pb:scriptpdfname")):"")||DOC_LABEL[slot];
+    return docs[slot].doc;
+  }catch{return null;}
 }
-async function getScriptPageImage(n){
-  if(!scriptDoc.doc||n<1||n>scriptDoc.doc.numPages)return null;
-  if(scriptDoc.pageCache.has(n))return scriptDoc.pageCache.get(n);
-  const r=await pdfRenderPage(scriptDoc.doc,n,1.7);scriptDoc.pageCache.set(n,r);return r;
+const setScriptPDF=(ab,name)=>saveDoc("script",ab,name);
+const restoreScriptPDF=()=>ensureDoc("script").then(d=>!!d);
+async function getDocPageImage(slot,n){
+  const d=docs[slot];if(!d.doc||n<1||n>d.doc.numPages)return null;
+  if(d.pageCache.has(n))return d.pageCache.get(n);
+  const r=await pdfRenderPage(d.doc,n,1.7);d.pageCache.set(n,r);return r;
 }
+async function getScriptPageImage(n){return getDocPageImage("script",n);}
 
 /* ---- guess page ranges from text positions (fallback aid) -------- */
 async function scriptPagesText(doc,onProgress){
@@ -756,6 +777,43 @@ function Lightbox({state,onClose}){
   </div>;
 }
 
+/* Fullscreen PDF page viewer: flip pages with prev/next (arrows, keys, swipe), zoom, page count.
+   Used to expand a scene's script and to open the ground-truth script/schedule documents. */
+function PdfViewer({open,slot,start,title,onClose}){
+  const [doc,setDoc]=useState(null),[n,setN]=useState(1),[img,setImg]=useState(null),[err,setErr]=useState(false),[zoom,setZoom]=useState(false);
+  const touch=useRef(null);
+  useEffect(()=>{if(!open)return;let on=true;setDoc(null);setImg(null);setErr(false);setZoom(false);
+    ensureDoc(slot).then(d=>{if(!on)return;if(!d){setErr(true);return;}setDoc(d);setN(clamp(start||1,1,d.numPages));});
+    return()=>{on=false;};},[open,slot,start]);
+  useEffect(()=>{if(!open||!doc)return;let on=true;setImg(null);getDocPageImage(slot,n).then(r=>{if(on)setImg(r);});return()=>{on=false;};},[open,doc,n,slot]);
+  useEffect(()=>{if(!open)return;const h=e=>{if(e.key==="Escape")onClose();else if(doc&&(e.key==="ArrowRight"||e.key==="ArrowDown")){e.preventDefault();setN(x=>Math.min(x+1,doc.numPages));}else if(doc&&(e.key==="ArrowLeft"||e.key==="ArrowUp")){e.preventDefault();setN(x=>Math.max(x-1,1));}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[open,doc,onClose]);
+  if(!open)return null;
+  const N=doc?doc.numPages:0;
+  const go=d=>setN(x=>clamp(x+d,1,N||1));
+  const ts=e=>{touch.current=e.touches[0].clientX;};
+  const te=e=>{if(touch.current==null||zoom)return;const dx=e.changedTouches[0].clientX-touch.current;touch.current=null;if(Math.abs(dx)>45)go(dx<0?1:-1);};
+  const nav={width:48,height:48,borderRadius:"50%",border:"none",background:"#0009",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"};
+  return <div style={{position:"fixed",inset:0,background:"#0b0b0d",zIndex:96,display:"flex",flexDirection:"column"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
+      <FileText size={16} color={c.accent}/>
+      <div style={{fontFamily:UI,fontWeight:700,fontSize:14,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title||docs[slot]?.name||DOC_LABEL[slot]}</div>
+      {N>0&&<div style={{fontFamily:MONO,fontSize:12,color:c.t2,flexShrink:0}}>{n} / {N}</div>}
+      <div style={{flex:1}}/>
+      {!err&&<IconBtn icon={zoom?ZoomOut:ZoomIn} dim onClick={()=>setZoom(z=>!z)} title="Zoom"/>}
+      <IconBtn icon={X} dim onClick={onClose} title="Close"/>
+    </div>
+    <div onTouchStart={ts} onTouchEnd={te} style={{flex:1,overflow:"auto",display:"flex",alignItems:zoom?"flex-start":"center",justifyContent:"center",padding:14,position:"relative",WebkitOverflowScrolling:"touch"}}>
+      {err?<div style={{color:c.t2,fontFamily:UI,fontSize:14,textAlign:"center",maxWidth:340,lineHeight:1.5,alignSelf:"center"}}>No {DOC_LABEL[slot].toLowerCase()} PDF loaded yet. Add it in Docs and it syncs to your other devices.</div>:
+       !img?<div style={{color:c.t2,fontFamily:MONO,fontSize:13,alignSelf:"center"}}>Rendering page {n}…</div>:
+       <img src={img.url} alt="" style={{width:zoom?"auto":"100%",maxWidth:zoom?"none":920,maxHeight:zoom?"none":"100%",objectFit:"contain",borderRadius:4,boxShadow:"0 6px 30px #000a"}}/>}
+    </div>
+    {N>1&&<>
+      <button onClick={()=>go(-1)} style={{...nav,position:"absolute",left:14,top:"56%",opacity:n<=1?0.35:1}}><ChevronLeft size={26}/></button>
+      <button onClick={()=>go(1)} style={{...nav,position:"absolute",right:14,top:"56%",opacity:n>=N?0.35:1}}><ChevronRight size={26}/></button>
+    </>}
+  </div>;
+}
+
 /* ---- ink + sketch persistence ----------------------------------- */
 async function loadSketch(id){const d=await store.get("pb:sketch:"+id);if(!d)return null;if(d.bgImgId&&!d.bgUrl)d.bgUrl=isImgUrl(d.bgImgId)?d.bgImgId:await store.get("pb:img:"+d.bgImgId);return d;}
 async function saveSketch(id,data){await store.set("pb:sketch:"+id,{strokes:data.strokes,aspect:data.aspect,bgImgId:data.bgImgId||null});}
@@ -855,7 +913,7 @@ function PanelShell({title,icon,action,children,wide}){
     <div style={{padding:14,overflowY:wide?"auto":"visible",flex:wide?1:"none",minHeight:0}}>{children}</div>
   </div>;
 }
-function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk,openLightbox,addGear,goScene,neighbors,openInfo,onToast,onSendRef}){
+function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk,openLightbox,addGear,goScene,neighbors,openInfo,onToast,onSendRef,openPdf}){
   const [bump,setBump]=useState(0),[drag,setDrag]=useState(false),[pickBg,setPickBg]=useState(false),[sendImg,setSendImg]=useState(null);
   const fileRef=useRef(null),camRef=useRef(null);
   const loc=locations.find(l=>l.id===scene.locationId);
@@ -901,7 +959,8 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
     </div>
   );
 
-  const Script=<PanelShell wide={wide} title="Script" icon={<FileText size={14} color={c.accent}/>}>
+  const Script=<PanelShell wide={wide} title="Script" icon={<FileText size={14} color={c.accent}/>}
+    action={openPdf&&<IconBtn icon={Maximize2} size={17} dim title="Open full script, flip pages" onClick={()=>openPdf({slot:"script",start:scene.pageStart||1,title:`Script · Scene ${scene.number}`})}/>}>
     <ScriptPages scene={scene} bump={bump} onMark={markPage}/>
   </PanelShell>;
 
@@ -971,16 +1030,24 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
 /* ---- shot list (free text, checkable) --------------------------- */
 function ShotList({scene,patchScene}){
   const [t,setT]=useState("");
-  const addLines=()=>{const lines=t.split("\n").map(x=>x.trim()).filter(Boolean);if(!lines.length)return;patchScene({shots:[...scene.shots,...lines.map(text=>({id:uid(),text,done:false}))]});setT("");};
-  const done=scene.shots.filter(s=>s.done).length;
+  const [drag,setDrag]=useState(null); // {from,to}
+  const listRef=useRef(null);
+  const shots=scene.shots;
+  const addLines=()=>{const lines=t.split("\n").map(x=>x.trim()).filter(Boolean);if(!lines.length)return;patchScene({shots:[...shots,...lines.map(text=>({id:uid(),text,done:false}))]});setT("");};
+  const done=shots.filter(s=>s.done).length;
+  const idxFromY=y=>{const rows=[...(listRef.current?.querySelectorAll("[data-shot]")||[])];for(let i=0;i<rows.length;i++){const r=rows[i].getBoundingClientRect();if(y<r.top+r.height/2)return i;}return rows.length-1;};
+  const onHandleDown=i=>e=>{e.preventDefault();e.currentTarget.setPointerCapture?.(e.pointerId);setDrag({from:i,to:i});};
+  const onHandleMove=e=>{if(!drag)return;const to=idxFromY(e.clientY);if(to!==drag.to)setDrag(d=>({...d,to}));};
+  const onHandleUp=()=>{if(!drag)return;const {from,to}=drag;setDrag(null);if(from===to||to==null)return;const arr=[...shots];const [m]=arr.splice(from,1);arr.splice(to,0,m);patchScene({shots:arr});};
   return <div>
-    <Label style={{marginBottom:6}}>Shot list{scene.shots.length?` · ${done}/${scene.shots.length}`:""}</Label>
-    {scene.shots.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:8}}>
-      {scene.shots.map((s,i)=><div key={s.id} style={{display:"flex",alignItems:"center",gap:9,background:c.bg2,border:`1px solid ${c.line}`,borderRadius:8,padding:"7px 10px"}}>
-        <span style={{fontFamily:MONO,fontSize:11,color:c.t2,minWidth:16,textAlign:"right"}}>{i+1}</span>
-        <button onClick={()=>patchScene({shots:scene.shots.map(x=>x.id===s.id?{...x,done:!x.done}:x)})} style={{width:20,height:20,borderRadius:6,border:`1.5px solid ${s.done?c.ok:c.line2}`,background:s.done?c.ok:"transparent",cursor:"pointer",display:"grid",placeItems:"center",flexShrink:0}}>{s.done&&<Check size={13} color="#fff"/>}</button>
+    <Label style={{marginBottom:6}}>Shot list{shots.length?` · ${done}/${shots.length}`:""}</Label>
+    {shots.length>0&&<div ref={listRef} style={{display:"flex",flexDirection:"column",gap:6,marginBottom:8}}>
+      {shots.map((s,i)=><div key={s.id} data-shot style={{display:"flex",alignItems:"center",gap:8,background:c.bg2,border:`1px solid ${drag&&drag.to===i&&drag.from!==i?c.accent:c.line}`,borderRadius:8,padding:"7px 8px",opacity:drag&&drag.from===i?0.45:1}}>
+        <span onPointerDown={onHandleDown(i)} onPointerMove={onHandleMove} onPointerUp={onHandleUp} onPointerCancel={()=>setDrag(null)} title="Drag to reorder" style={{cursor:"grab",color:c.t2,display:"grid",placeItems:"center",touchAction:"none",padding:"2px 1px",flexShrink:0}}><GripVertical size={15}/></span>
+        <span style={{fontFamily:MONO,fontSize:11,color:c.t2,minWidth:15,textAlign:"right"}}>{i+1}</span>
+        <button onClick={()=>patchScene({shots:shots.map(x=>x.id===s.id?{...x,done:!x.done}:x)})} style={{width:20,height:20,borderRadius:6,border:`1.5px solid ${s.done?c.ok:c.line2}`,background:s.done?c.ok:"transparent",cursor:"pointer",display:"grid",placeItems:"center",flexShrink:0}}>{s.done&&<Check size={13} color="#fff"/>}</button>
         <span style={{flex:1,fontFamily:UI,fontSize:13,color:s.done?c.t2:c.t0,textDecoration:s.done?"line-through":"none",whiteSpace:"pre-wrap"}}>{s.text}</span>
-        <button onClick={()=>patchScene({shots:scene.shots.filter(x=>x.id!==s.id)})} style={{background:"none",border:"none",color:c.t2,cursor:"pointer",padding:2}}><X size={14}/></button>
+        <button onClick={()=>patchScene({shots:shots.filter(x=>x.id!==s.id)})} style={{background:"none",border:"none",color:c.t2,cursor:"pointer",padding:2,flexShrink:0}}><X size={14}/></button>
       </div>)}
     </div>}
     <textarea value={t} onChange={e=>setT(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();addLines();}}} placeholder="Type a shot, hit Enter. One per line, or paste a whole list. Shift+Enter for a line break inside a shot." style={{...inputStyle(),minHeight:40,resize:"vertical",lineHeight:1.4}}/>
@@ -1749,6 +1816,7 @@ function ProjectImportPane({project,setProject,onToast}){
       for(const s of incScenes){const ids=[];for(const r of s.refs){if(typeof r!=="string")continue;if(/^data:/.test(r)){setProg(`Storing images ${++done}/${total}…`);ids.push(await putImage(r));}else ids.push(r);}s.refs=ids;}
       let look=[...(data.look||[])];
       for(let i=0;i<look.length;i++){if(typeof look[i]==="string"&&/^data:/.test(look[i])){setProg(`Storing look ${i+1}/${look.length}…`);look[i]=await putImage(look[i]);}}
+      if(data.docs){for(const slot of ["script","schedule"]){const d=data.docs[slot];const m=d&&typeof d.data==="string"&&d.data.match(/^data:.*?;base64,(.*)$/);if(m){setProg(`Storing ${slot} document…`);try{await saveDoc(slot,b64ToU8(m[1]).buffer,d.name||"");}catch{}}}}
       setProg("Merging…");
       setProject(p=>applyProjectFile(p,{...data,scenes:incScenes,look}));
       onToast(`Project loaded · ${review.scenes} scenes, ${review.shots} shots, ${review.refs} refs`);
@@ -1820,7 +1888,7 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
       </div>
     </Card>
     <Card title="Cloud sync (optional)" icon={CloudDownload}>
-      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>Sync the whole deck across devices through your R2 Files Worker. Enter the worker key (stored only on this device, never in the app code). Push from one device, Pull on another. The film stays private: the worker requires this key, nothing is made public.</div>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>Enter your R2 Files Worker key once on each device and the deck syncs automatically: it pulls the latest when you open or refocus the app, and pushes your edits a few seconds after you make them (a "Synced" badge shows in the top bar). No manual import needed on a new device, just the key. The film stays private: the worker requires this key, nothing is public. The buttons below force a sync if you ever want to.</div>
       <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:11}}>
         <TextInput type="password" value={r2key} placeholder="Files Worker X-API-Key" autoComplete="off" onChange={e=>setR2k(e.target.value)}/>
         <Btn kind="ghost" size={12} onClick={async()=>{await setR2Key(r2key.trim());onToast(r2key.trim()?"Cloud key saved on this device":"Cloud key cleared");}}>Save</Btn>
@@ -2019,13 +2087,44 @@ function LookBoard({project,setProject,openLightbox,onToast}){
   </div>;
 }
 
+/* DOCUMENTS — the ground-truth current PDFs (script + schedule), viewable full-screen */
+function Documents({openPdf,onToast}){
+  const [,tick]=useState(0);
+  useEffect(()=>{let on=true;Promise.all([ensureDoc("script"),ensureDoc("schedule")]).then(()=>on&&tick(x=>x+1));return()=>{on=false;};},[]);
+  const load=slot=>async file=>{if(!file)return;try{onToast&&onToast("Loading "+DOC_LABEL[slot]+"…");await saveDoc(slot,await file.arrayBuffer(),file.name);tick(x=>x+1);onToast&&onToast(DOC_LABEL[slot]+" loaded · syncs to your other devices");}catch(e){onToast&&onToast("Couldn't load that PDF");}};
+  const Slot=({slot,icon:Icon,desc})=>{const loaded=!!docs[slot].doc,name=docs[slot].name;return (
+    <Card title={DOC_LABEL[slot]} icon={Icon}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>{desc}</div>
+      <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}>
+        <Btn kind="primary" size={12} disabled={!loaded} onClick={()=>openPdf({slot,start:1,title:DOC_LABEL[slot]})}><BookOpen size={15}/>{loaded?"Open":"Not loaded"}</Btn>
+        <label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={14}/>{loaded?"Replace PDF":"Load PDF"}</Btn><input type="file" accept="application/pdf" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];e.target.value="";load(slot)(f);}}/></label>
+        {loaded&&name&&<span style={{fontFamily:MONO,fontSize:11,color:c.t2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:240}}>{name}</span>}
+      </div>
+    </Card>);};
+  return <div style={{maxWidth:720,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{fontFamily:UI,fontSize:13.5,color:c.t1,lineHeight:1.55,maxWidth:640}}>The ground-truth current documents. Open either full-screen and flip pages with the arrows (or swipe). They travel with the deck, so once loaded they show on every synced device.</div>
+    <Slot slot="script" icon={FileText} desc="The current screenplay PDF. Also drives the per-scene script pages and the expand button in each scene."/>
+    <Slot slot="schedule" icon={Calendar} desc="The current one-liner / shooting schedule PDF."/>
+  </div>;
+}
+
 /* APP */
 const DEFAULT_PROJECT=()=>({meta:{title:"Untitled Film",baseName:"",baseLat:"",baseLng:"",avgKmh:28,tz:(Intl.DateTimeFormat().resolvedOptions().timeZone)||"UTC",theme:"dark"},scenes:[],locations:[],crew:{camera:[],grip:[],electric:[]},contacts:[],gear:[],inbox:[],look:[]});
+function normalizeProject(p){
+  if(!p||typeof p!=="object")p=DEFAULT_PROJECT();
+  p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};
+  p.scenes=(p.scenes||[]).map(s=>({...emptyScene(s.number),...s}));
+  p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));
+  p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};
+  p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];
+  return p;
+}
 const NAV=[
   {k:"home",label:"Home",icon:Home},
   {k:"days",label:"Schedule",icon:Calendar},
   {k:"scenes",label:"Scenes",icon:Film},
   {k:"look",label:"Look",icon:ImageIcon},
+  {k:"docs",label:"Docs",icon:BookOpen},
   {k:"capture",label:"Capture",icon:Inbox},
   {k:"locations",label:"Locations",icon:MapPin},
   {k:"crew",label:"Crew",icon:Users},
@@ -2050,20 +2149,70 @@ export default function App(){
   const [more,setMore]=useState(false);
   const [jump,setJump]=useState(false);
   const [exp,setExp]=useState({mode:"full",depts:["camera","grip","electric"]});
+  const [pdfv,setPdfv]=useState(null);
+  const [hasKey,setHasKey]=useState(false);
+  const [sync,setSync]=useState({state:"off",at:0}); // off|idle|pending|syncing|synced|error
   const wide=useWide();
   const loaded=useRef(false);
+  const pulling=useRef(false),skipPush=useRef(false),pushTimer=useRef(null),dirty=useRef(false);
 
   useEffect(()=>{(async()=>{
     try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
-    loadAIKey();loadR2Key();
-    let p=await store.get("pb:project");
-    if(!p||typeof p!=="object"){p=DEFAULT_PROJECT();}
-    p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};p.scenes=(p.scenes||[]).map(s=>({...emptyScene(s.number),...s}));p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];
+    loadAIKey();await loadR2Key();
+    const keyed=!!R2_KEY;setHasKey(keyed);
+    // Auto-pull on open: if the cloud deck is newer than anything this device has synced and
+    // newer than its local edits, bring it down first — so a new device needs no manual import.
+    if(keyed){try{
+      setSync({state:"syncing",at:Date.now()});
+      const meta=await remoteDeckMeta();
+      const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
+      if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>=localMtime){pulling.current=true;await pullDeckFromCloud();pulling.current=false;}
+      setSync({state:"synced",at:Date.now()});
+    }catch{pulling.current=false;setSync({state:"error",at:Date.now()});}}
+    let p=normalizeProject(await store.get("pb:project"));
     applyTheme(p.meta.theme);setProject(p);
     setView(p.scenes.length?"home":"import");
     restoreScriptPDF().then(()=>setTb(b=>b+1));
     setTimeout(()=>{loaded.current=true;},60);
   })();},[]);
+
+  // Auto-push: debounced cloud sync after local edits (only when a worker key is set).
+  useEffect(()=>{
+    if(!loaded.current||!project||!R2_KEY)return;
+    if(skipPush.current){skipPush.current=false;return;}
+    store.set("pb:project_mtime",Date.now());
+    dirty.current=true;
+    setSync({state:"pending",at:Date.now()});
+    clearTimeout(pushTimer.current);
+    pushTimer.current=setTimeout(async()=>{
+      setSync({state:"syncing",at:Date.now()});
+      try{await pushDeckToCloud();dirty.current=false;setSync({state:"synced",at:Date.now()});}catch{setSync({state:"error",at:Date.now()});}
+    },5000);
+    return()=>clearTimeout(pushTimer.current);
+  },[project]);
+
+  // Pull newer cloud edits when the tab regains focus; flush a pending push when it's hidden.
+  useEffect(()=>{
+    const checkPull=async()=>{
+      if(!R2_KEY||pulling.current)return;
+      try{
+        const meta=await remoteDeckMeta();
+        const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
+        if(meta&&meta.ts&&meta.ts>localSynced&&meta.ts>localMtime){
+          pulling.current=true;setSync({state:"syncing",at:Date.now()});
+          await pullDeckFromCloud();
+          skipPush.current=true;setProject(normalizeProject(await store.get("pb:project")));setTb(b=>b+1);
+          pulling.current=false;setSync({state:"synced",at:Date.now()});
+        }
+      }catch{pulling.current=false;}
+    };
+    const onVis=()=>{
+      if(document.visibilityState==="visible")checkPull();
+      else if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);pushDeckToCloud().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
+    };
+    window.addEventListener("focus",checkPull);document.addEventListener("visibilitychange",onVis);
+    return()=>{window.removeEventListener("focus",checkPull);document.removeEventListener("visibilitychange",onVis);};
+  },[]);
 
   useEffect(()=>{if(!loaded.current||!project)return;const t=setTimeout(()=>{store.set("pb:project",project);},600);return()=>clearTimeout(t);},[project]);
 
@@ -2078,6 +2227,7 @@ export default function App(){
     if(mode==="move"&&s.number===fromN)return {...s,refs:s.refs.filter(x=>x!==imgId)};
     return s;
   })})),[]);
+  const openPdf=useCallback(v=>setPdfv(v),[]);
   const themeChange=t=>{applyTheme(t);setTb(b=>b+1);};
   // Global back/forward across screens: a history stack of {view,activeScene} snapshots.
   const histRef=useRef({stack:[],idx:-1,nav:false});
@@ -2125,6 +2275,10 @@ export default function App(){
       {(view==="scenes"||view==="scene")&&<div style={{display:"flex",borderRadius:9,overflow:"hidden",border:`1px solid ${c.line2}`}}>
         {[{k:"story",l:"Story"},{k:"shoot",l:"Shooting"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} style={{padding:wide?"8px 14px":"7px 11px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:12.5,fontWeight:700,cursor:"pointer"}}>{o.l}</button>)}
       </div>}
+      {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error — will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
+        {sync.state==="syncing"||sync.state==="pending"?<RefreshCw size={15} color={c.accent}/>:sync.state==="error"?<Cloud size={15}/>:<CheckCircle2 size={15} color={c.ok}/>}
+        {wide&&<span>{sync.state==="syncing"||sync.state==="pending"?"Syncing":sync.state==="error"?"Sync off":"Synced"}</span>}
+      </div>}
       {wide&&<IconBtn icon={c.bg0===DARK.bg0?SunMedium:MoonStar} dim title="Theme" onClick={()=>{const t=(project.meta.theme==="light")?"dark":"light";setProject(p=>({...p,meta:{...p.meta,theme:t}}));themeChange(t);}}/>}
     </div>
   );
@@ -2136,10 +2290,11 @@ export default function App(){
       {TopBar}
       <div style={{flex:1,padding:wide?"20px 22px":"15px 13px",paddingBottom:wide?40:90,overflowY:"auto",...(view==="scene"&&wide?{display:"flex",flexDirection:"column"}:{})}}>
         {view==="home"&&<Dashboard project={project} onOpen={openScene} onNav={setView}/>}
-        {view==="scene"&&curScene&&<SceneView scene={curScene} scenes={project.scenes} meta={project.meta} locations={project.locations} gearList={project.gear} wide={wide} patchScene={patch=>patchScene(curScene.number,patch)} openInk={setInk} openLightbox={openLightbox} addGear={(name,dept)=>tagGear(curScene.number,name,dept)} goScene={openScene} neighbors={neighbors} openInfo={()=>setInfo(curScene)} onToast={toastFn} onSendRef={sendRefBetween}/>}
+        {view==="scene"&&curScene&&<SceneView scene={curScene} scenes={project.scenes} meta={project.meta} locations={project.locations} gearList={project.gear} wide={wide} patchScene={patch=>patchScene(curScene.number,patch)} openInk={setInk} openLightbox={openLightbox} addGear={(name,dept)=>tagGear(curScene.number,name,dept)} goScene={openScene} neighbors={neighbors} openInfo={()=>setInfo(curScene)} onToast={toastFn} onSendRef={sendRefBetween} openPdf={openPdf}/>}
         {view==="scene"&&!curScene&&<Empty icon={Film} title="Scene not found" body="It may have been cut. Open the Scenes list." action={<Btn kind="primary" onClick={()=>setView("scenes")}>Scenes</Btn>}/>}
         {view==="scenes"&&<><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}><Btn kind="ghost" size={12} onClick={()=>setInfo({__new:true,status:"todo"})}><Plus size={15}/>Add scene</Btn></div><Library project={project} lens={lens} onOpen={openScene}/></>}
         {view==="look"&&<LookBoard project={project} setProject={setProject} openLightbox={openLightbox} onToast={toastFn}/>}
+        {view==="docs"&&<Documents openPdf={openPdf} onToast={toastFn}/>}
         {view==="days"&&<Days project={project} onOpen={openScene}/>}
         {view==="capture"&&<Capture project={project} setProject={setProject} onFiled={()=>{}} onToast={toastFn}/>}
         {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn}/>}
@@ -2173,8 +2328,9 @@ export default function App(){
     <QuickJump open={jump} scenes={project.scenes} onClose={()=>setJump(false)} onOpen={openScene}/>
     {ink&&<InkCanvas title={ink.title} bgUrl={ink.bgUrl} initial={ink.initial} onClose={()=>setInk(null)} onSave={d=>{ink.onSave&&ink.onSave(d);}}/>}
     <Lightbox state={light} onClose={()=>setLight(null)}/>
+    <PdfViewer open={!!pdfv} slot={pdfv?.slot} start={pdfv?.start} title={pdfv?.title} onClose={()=>setPdfv(null)}/>
     <SceneInfo open={!!info} init={info} locations={project.locations} onClose={()=>setInfo(null)} onSave={saveInfo} onDelete={delScene}/>
     <Toast toast={toast} onClose={()=>setToast(null)}/>
   </div>;
 }
-const TITLES={home:"Home",days:"Schedule",scenes:"Scenes",look:"Look",capture:"Capture",locations:"Locations",crew:"Crew",gear:"Gear",contacts:"Contacts",export:"Export PDF",import:"Import",settings:"Settings",scene:""};
+const TITLES={home:"Home",days:"Schedule",scenes:"Scenes",look:"Look",docs:"Documents",capture:"Capture",locations:"Locations",crew:"Crew",gear:"Gear",contacts:"Contacts",export:"Export PDF",import:"Import",settings:"Settings",scene:""};
