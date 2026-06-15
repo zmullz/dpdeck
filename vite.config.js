@@ -6,14 +6,21 @@ import { VitePWA } from "vite-plugin-pwa";
 // Inline styles only, lucide-react for icons, no other UI libs.
 // PWA: installable + offline (app shell precached). The film data is NOT bundled;
 // it loads per device via Import (kept off the public web).
+const BASE = process.env.GHPAGES ? "/dpdeck/" : "/";
+
 export default defineConfig({
-  base: process.env.GHPAGES ? "/dpdeck/" : "/",
+  base: BASE,
   plugins: [
     react(),
     VitePWA({
       registerType: "autoUpdate",
       includeAssets: ["apple-touch-icon.png", "icon-192.png", "icon-512.png"],
       manifest: {
+        // start_url/scope/id MUST match the deploy base (/dpdeck/ on GitHub Pages). With "/",
+        // an installed iOS home-screen PWA opens the domain root and 404s — that was the bug.
+        id: BASE,
+        scope: BASE,
+        start_url: BASE,
         name: "DP Deck",
         short_name: "DP Deck",
         description: "A private prep and shoot deck.",
@@ -21,7 +28,6 @@ export default defineConfig({
         background_color: "#121317",
         display: "standalone",
         orientation: "any",
-        start_url: "/",
         icons: [
           { src: "icon-192.png", sizes: "192x192", type: "image/png" },
           { src: "icon-512.png", sizes: "512x512", type: "image/png" },
