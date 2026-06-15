@@ -299,8 +299,38 @@ async function r2Read(name){
 }
 async function r2ReadRaw(key){const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(res.status===404)return null;if(!res.ok)throw new Error("cloud "+res.status);return await res.text();}
 async function r2Write(key,text){const res=await fetch(R2_BASE+"/write/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"PUT",headers:{...(r2Headers()||{}),"Content-Type":"application/json"},body:text});if(!res.ok)throw new Error("cloud write "+res.status);return true;}
-async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();const s=JSON.stringify(b);await r2Write(DECK_KEY,s);try{await r2Write(DECK_META,JSON.stringify({ts:b.ts}));}catch{}await store.set("pb:synced_ts",b.ts);await store.set("pb:project_mtime",b.ts);return s.length;}
+async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();const s=JSON.stringify(b);await r2Write(DECK_KEY,s);try{await r2Write(DECK_META,JSON.stringify({ts:b.ts}));}catch{}await store.set("pb:synced_ts",b.ts);await store.set("pb:project_mtime",b.ts);try{await writeDailySnapshot(s,b.ts);}catch{}return s.length;}
 async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");const o=JSON.parse(t);await importFullBackup(o);await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());return o.ts||0;}
+async function r2Delete(key){try{const res=await fetch(R2_BASE+"/delete/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"DELETE",headers:r2Headers()});return res.ok;}catch{return false;}}
+/* VERSION HISTORY — durable dated snapshots in R2 so a bad overwrite or accidental erase is
+   recoverable to a point in time. One snapshot per calendar day (first push of the day), plus
+   on-demand snapshots (e.g. before an erase). Index in dpdeck/_snapshots.json; kept to SNAP_KEEP. */
+const SNAP_INDEX="dpdeck/_snapshots.json", SNAP_KEEP=40;
+const snapKey=tag=>"dpdeck/history/deck-"+tag+".json";
+async function readSnapshotIndex(){try{const t=await r2ReadRaw(SNAP_INDEX);return t?(JSON.parse(t).snaps||[]):[];}catch{return [];}}
+async function pruneAndIndex(idx){idx.sort((a,b)=>(a.ts||0)-(b.ts||0));while(idx.length>SNAP_KEEP){const old=idx.shift();await r2Delete(snapKey(old.tag));}try{await r2Write(SNAP_INDEX,JSON.stringify({snaps:idx}));}catch{}}
+async function writeDailySnapshot(serialized,ts){
+  if(!R2_KEY)return;
+  const day=new Date(ts).toISOString().slice(0,10);
+  if((await store.get("pb:snap_day"))===day)return; // already have today's snapshot
+  await r2Write(snapKey(day),serialized);
+  const idx=await readSnapshotIndex();
+  if(!idx.some(s=>s.tag===day))idx.push({tag:day,ts,label:day});
+  await pruneAndIndex(idx);
+  await store.set("pb:snap_day",day);
+}
+async function writeSnapshotNow(tag,label){
+  if(!R2_KEY)return false;
+  const b=await exportFullBackup();await r2Write(snapKey(tag),JSON.stringify(b));
+  const idx=await readSnapshotIndex();const i=idx.findIndex(s=>s.tag===tag);if(i>=0)idx[i]={tag,ts:b.ts,label:label||tag};else idx.push({tag,ts:b.ts,label:label||tag});
+  await pruneAndIndex(idx);return true;
+}
+async function restoreSnapshot(tag){
+  const t=await r2ReadRaw(snapKey(tag));if(!t)throw new Error("Snapshot not found.");
+  await importFullBackup(JSON.parse(t));
+  await store.set("pb:synced_ts",Date.now());await store.set("pb:project_mtime",Date.now());
+  return true;
+}
 /* in-app AI: uses the user's OWN Anthropic key, stored locally (pb:aikey) on this device,
    called direct from the browser. No key in code, no server. Empty key = AI buttons stay off;
    the paste-JSON and Load Project paths never need it. */
@@ -1865,7 +1895,9 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
   const [wipe,setWipe]=useState(false);
   const [aikey,setAikey]=useState("");
   const [r2key,setR2k]=useState(""),[syncing,setSyncing]=useState("");
-  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));store.get("pb:r2key").then(k=>setR2k(k||""));},[]);
+  const [snaps,setSnaps]=useState(null),[restoring,setRestoring]=useState(""),[lastBk,setLastBk]=useState(0);
+  const loadSnaps=()=>{if(!R2_KEY){setSnaps([]);return;}setSnaps(null);readSnapshotIndex().then(idx=>setSnaps(idx.slice().reverse())).catch(()=>setSnaps([]));};
+  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));store.get("pb:r2key").then(k=>setR2k(k||""));store.get("pb:lastbackup").then(v=>setLastBk(v||0));loadSnaps();},[]);
   const useHere=async()=>{try{const {lat,lng}=await whereAmI();setProject(p=>({...p,meta:{...p.meta,baseLat:lat.toFixed(6),baseLng:lng.toFixed(6)}}));onToast("Base set to current location");}catch{onToast("Couldn't get location");}};
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     <Card title="Film" icon={Film}>
@@ -1900,14 +1932,29 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
         <Btn kind="ghost" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("pull");try{await pullDeckFromCloud();onToast("Pulled deck from cloud. Reloading…");setTimeout(()=>location.reload(),800);}catch(e){onToast("Pull failed: "+(e.message||""));setSyncing("");}}}><CloudDownload size={15}/>{syncing==="pull"?"Pulling…":"Pull deck from cloud"}</Btn>
       </div>
     </Card>
+    <Card title="Version history (automatic)" icon={RefreshCw}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>{R2_KEY?`A dated snapshot of the whole deck is saved to your cloud automatically once a day and kept for ${SNAP_KEEP} days. If a sync goes wrong or you erase by accident, roll back to any day below. This is your safety net.`:"Turn on Cloud sync above to get automatic daily snapshots you can roll back to."}</div>
+      {R2_KEY&&<>
+        {snaps===null?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>Loading snapshots…</div>:
+         snaps.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>No snapshots yet — one is written the next time the deck syncs.</div>:
+         <div style={{display:"flex",flexDirection:"column",gap:7,maxHeight:280,overflowY:"auto"}}>
+           {snaps.map(s=><div key={s.tag} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,padding:"8px 11px"}}>
+             <div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0}}>{s.label||s.tag}</div><div style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{s.ts?new Date(s.ts).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):s.tag}</div></div>
+             <Btn kind="ghost" size={12} disabled={!!restoring} onClick={async()=>{if(!window.confirm(`Restore the deck to ${s.label||s.tag}? This replaces the current deck (a snapshot of the current state is saved first, so this is reversible).`))return;setRestoring(s.tag);try{await writeSnapshotNow("before-restore-"+Date.now(),"Before restore "+todayISO());await restoreSnapshot(s.tag);onToast("Restored "+(s.label||s.tag)+". Reloading…");setTimeout(()=>location.reload(),900);}catch(e){onToast("Restore failed: "+(e.message||""));setRestoring("");}}}>{restoring===s.tag?"Restoring…":"Restore"}</Btn>
+           </div>)}
+         </div>}
+        <div style={{marginTop:10}}><Btn kind="ghost" size={12} onClick={loadSnaps}><RefreshCw size={14}/>Refresh</Btn></div>
+      </>}
+    </Card>
     <Card title="Data" icon={Settings}>
-      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:12}}>{HAS?"Your deck is saved locally in this browser (IndexedDB), set to persistent so the browser will not evict it. Download a full backup to guard against loss and to move the whole deck to another device (restore it there).":"Heads up: persistent storage isn't available here, so this session won't be saved."}</div>
-      <div style={{display:"flex",gap:9,flexWrap:"wrap",marginBottom:14}}>
-        <Btn kind="ghost" size={12} onClick={async()=>{try{onToast("Building backup…");const b=await exportFullBackup();downloadJSON(`dpdeck-backup-${todayISO()}.json`,b);onToast("Backup downloaded");}catch(e){onToast("Backup failed: "+(e.message||""));}}}><CloudDownload size={15}/>Download full backup</Btn>
-        <label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={15}/>Restore backup</Btn><input type="file" accept="application/json,.json" style={{display:"none"}} onChange={async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;try{await importFullBackup(JSON.parse(await f.text()));onToast("Backup restored. Reloading…");setTimeout(()=>location.reload(),700);}catch(err){onToast("Restore failed: "+(err.message||""));}}}/></label>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:12}}>{HAS?"Your deck is saved locally (IndexedDB, persistent) and, with Cloud sync on, mirrored to your R2 cloud with daily snapshots above. A downloaded backup is an extra offline copy and the way to move the deck to a device that isn't on sync.":"Heads up: persistent storage isn't available here, so this session won't be saved. Download a backup."}</div>
+      <div style={{display:"flex",gap:9,flexWrap:"wrap",marginBottom:8}}>
+        <Btn kind="ghost" size={12} onClick={async()=>{try{onToast("Building backup…");const b=await exportFullBackup();downloadJSON(`dpdeck-backup-${todayISO()}.json`,b);await store.set("pb:lastbackup",Date.now());setLastBk(Date.now());onToast("Backup downloaded");}catch(e){onToast("Backup failed: "+(e.message||""));}}}><CloudDownload size={15}/>Download full backup</Btn>
+        <label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={15}/>Restore backup</Btn><input type="file" accept="application/json,.json" style={{display:"none"}} onChange={async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;try{await importFullBackup(JSON.parse(await f.text()));await store.set("pb:project_mtime",Date.now());onToast("Backup restored. Reloading…");setTimeout(()=>location.reload(),700);}catch(err){onToast("Restore failed: "+(err.message||""));}}}/></label>
       </div>
+      <div style={{fontFamily:MONO,fontSize:10.5,color:c.t2,marginBottom:14}}>{lastBk?`Last download backup: ${new Date(lastBk).toLocaleDateString()}`:"No download backup taken yet."}{R2_KEY?" · cloud snapshots: on":" · cloud snapshots: off"}</div>
       {!wipe?<Btn kind="danger" size={12} onClick={()=>setWipe(true)}><Trash2 size={15}/>Erase everything</Btn>:
-        <div style={{display:"flex",gap:9,alignItems:"center"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger}}>Erase all scenes, prep, and media?</span><Btn kind="danger" size={12} onClick={async()=>{for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname"])await store.del(k);location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
+        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to — turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:scriptname","pb:doc:schedulename","pb:snap_day"])await store.del(k);location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
     </Card>
     <div style={{textAlign:"center",fontFamily:MONO,fontSize:10.5,color:c.t2,padding:"4px 0 12px"}}>DP DECK · prep + shoot · one film</div>
   </div>;
@@ -2156,7 +2203,7 @@ export default function App(){
   const [sync,setSync]=useState({state:"off",at:0}); // off|idle|pending|syncing|synced|error
   const wide=useWide();
   const loaded=useRef(false);
-  const pulling=useRef(false),skipPush=useRef(false),pushTimer=useRef(null),dirty=useRef(false);
+  const pulling=useRef(false),skipPush=useRef(false),pushTimer=useRef(null),dirty=useRef(false),nudged=useRef(false);
 
   useEffect(()=>{(async()=>{
     try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
@@ -2244,6 +2291,16 @@ export default function App(){
   const goBack=()=>{const h=histRef.current;if(h.idx<=0)return;h.idx--;h.nav=true;const l=h.stack[h.idx];setActiveScene(l.activeScene);setView(l.view);};
   const goFwd=()=>{const h=histRef.current;if(h.idx>=h.stack.length-1)return;h.idx++;h.nav=true;const l=h.stack[h.idx];setActiveScene(l.activeScene);setView(l.view);};
   const canBack=histRef.current.idx>0,canFwd=histRef.current.idx<histRef.current.stack.length-1;
+  // One-shot safety nudge: only when this device has work but no cloud safety net (no key + stale/no backup).
+  useEffect(()=>{
+    if(!project||nudged.current)return;nudged.current=true;
+    setTimeout(async()=>{
+      if(R2_KEY)return; // cloud snapshots already cover safety
+      if(!(project.scenes||[]).some(s=>s.status!=="omitted"))return;
+      const last=(await store.get("pb:lastbackup"))||0;
+      if(((Date.now()-last)/864e5)>=10)toastFn("This deck is only on this device. Turn on Cloud sync in Settings, or download a backup, so you don't lose work.");
+    },2500);
+  },[project]);
 
   if(!project)return <div style={{position:"fixed",inset:0,background:c.bg0,display:"grid",placeItems:"center"}}><div style={{fontFamily:MONO,color:c.accent,fontSize:13}}>Loading deck…</div></div>;
 
