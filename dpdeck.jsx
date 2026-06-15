@@ -80,6 +80,15 @@ function sunTimes(date,lat,lng){
   for(const [a,ri,se] of ST){const h=a*rad,Js=setJ(h,lw,phi,d,n,M,L);r[ri]=fromJulian(Jn-(Js-Jn));r[se]=fromJulian(Js);}
   return r;
 }
+// Window when the sun is ABOVE `deg` (harsh high/midday sun — a DP usually avoids shooting here).
+// null if the sun never reaches that altitude on this date/latitude.
+function sunAboveWindow(date,lat,lng,deg){
+  const lw=rad*-lng,phi=rad*lat,D=toDays(date),n=Math.round(D-J0-lw/(2*PI)),ds=aT(0,lw,n),M=sma(ds),L=ecl(M),d=dec(L,0),Jn=stJ(ds,M,L);
+  const h=deg*rad,arg=(Math.sin(h)-Math.sin(phi)*Math.sin(d))/(Math.cos(phi)*Math.cos(d));
+  if(arg>1||arg<-1||isNaN(arg))return null;
+  const Js=setJ(h,lw,phi,d,n,M,L);if(isNaN(Js))return null;
+  return {start:fromJulian(Jn-(Js-Jn)),end:fromJulian(Js)};
+}
 function tzOff(date,tz){try{const p=new Intl.DateTimeFormat("en-US",{timeZone:tz,hour12:false,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}).formatToParts(date).reduce((a,x)=>((a[x.type]=x.value),a),{});const u=Date.UTC(p.year,p.month-1,p.day,p.hour==="24"?0:p.hour,p.minute,p.second);return Math.round((u-date.getTime())/6e4);}catch{return 0;}}
 function dayNoonUTC(ymd){const [y,m,d]=ymd.split("-").map(Number);return new Date(Date.UTC(y,m-1,d,12));}
 function localToAbs(ymd,h,mn,tz){const [y,m,d]=ymd.split("-").map(Number);const off=tzOff(new Date(Date.UTC(y,m-1,d,12)),tz);return new Date(Date.UTC(y,m-1,d,h,mn)-off*6e4);}
@@ -754,22 +763,25 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title}){
 
 /* SUN + WEATHER instruments */
 function SunBar({lat,lng,tz,date,hm}){
-  const data=useMemo(()=>{if(!date)return null;try{return sunTimes(dayNoonUTC(date),+lat,+lng);}catch{return null;}},[lat,lng,date]);
+  const data=useMemo(()=>{if(!date)return null;try{const t=sunTimes(dayNoonUTC(date),+lat,+lng);t._hi=sunAboveWindow(dayNoonUTC(date),+lat,+lng,40);return t;}catch{return null;}},[lat,lng,date]);
   if(!data)return null;
   const p={dawn:tMin(data.dawn,tz),sr:tMin(data.sunrise,tz),ge:tMin(data.goldEnd,tz),gs:tMin(data.goldStart,tz),ss:tMin(data.sunset,tz),dusk:tMin(data.dusk,tz)};
   if(p.sr==null||p.ss==null)return null;
   const cl=x=>clamp(x==null?0:x,0,1440),pct=v=>v/1440*100;
   const NI="#0c0e13",TW=c.night,DA="#37597a",GO=c.accent;
   const segs=[[0,cl(p.dawn??p.sr),NI],[cl(p.dawn??p.sr),cl(p.sr),TW],[cl(p.sr),cl(p.ge??p.sr),GO],[cl(p.ge??p.sr),cl(p.gs??p.ss),DA],[cl(p.gs??p.ss),cl(p.ss),GO],[cl(p.ss),cl(p.dusk??p.ss),TW],[cl(p.dusk??p.ss),1440,NI]];
+  const hi=data._hi, hs=hi?tMin(hi.start,tz):null, he=hi?tMin(hi.end,tz):null;
   return <div>
     <div style={{position:"relative",height:22,borderRadius:6,overflow:"hidden",border:`1px solid ${c.line}`}}>
       {segs.map(([a,b,col],i)=><div key={i} style={{position:"absolute",left:pct(a)+"%",width:pct(Math.max(0,b-a))+"%",top:0,bottom:0,background:col}}/>)}
+      {hs!=null&&he!=null&&<div title="Harsh high sun, above 40 degrees, avoid" style={{position:"absolute",left:pct(cl(hs))+"%",width:pct(Math.max(0,he-hs))+"%",top:0,bottom:0,background:"repeating-linear-gradient(45deg,transparent,transparent 4px,#ff5a5a66 4px,#ff5a5a66 8px)",borderLeft:"1.5px solid #ff5a5a",borderRight:"1.5px solid #ff5a5a",pointerEvents:"none"}}/>}
       {hm!=null&&<div style={{position:"absolute",left:`calc(${pct(cl(hm))}% - 1px)`,top:-2,bottom:-2,width:2,background:"#fff",boxShadow:"0 0 5px #000"}}/>}
     </div>
     <div style={{position:"relative",height:12,marginTop:3}}>
       <span style={{position:"absolute",left:pct(cl(p.sr))+"%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:9.5,color:c.t2}}>{fmtT(data.sunrise,tz)}</span>
       <span style={{position:"absolute",left:pct(cl(p.ss))+"%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:9.5,color:c.t2}}>{fmtT(data.sunset,tz)}</span>
     </div>
+    {hs!=null&&he!=null&&<div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,fontFamily:UI,fontSize:10.5,color:"#ff8a8a",lineHeight:1.3}}><span style={{width:10,height:10,borderRadius:2,flexShrink:0,background:"repeating-linear-gradient(45deg,transparent,transparent 2px,#ff5a5a 2px,#ff5a5a 4px)",border:"1px solid #ff5a5a"}}/>Harsh midday sun (above 40°): {fmtT(hi.start,tz)} to {fmtT(hi.end,tz)}. Avoid shooting.</div>}
   </div>;
 }
 function SunCompass({lat,lng,tz,date,hm}){
@@ -1124,7 +1136,10 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
   ):null;
 
   const Script=<PanelShell wide={wide} title="Script" icon={<FileText size={14} color={c.accent}/>}
-    action={scene.scriptText&&<IconBtn icon={Maximize2} size={17} dim title="Full-screen script for this scene" onClick={()=>setScriptFull(true)}/>}>
+    action={<div style={{display:"flex",gap:4}}>
+      <IconBtn icon={BookOpen} size={17} dim title="Open the script PDF here and flip pages" onClick={async()=>{try{const idx=await scriptPageIndex(sceneNums);const np=scriptDoc.doc?.numPages||0;const k=String(scene.number||"").toUpperCase();let pg=(idx&&idx.get(k))||0;if(!pg)pg=Math.min((scene.pageStart||1)+(+(meta?.scriptPageOffset||0)),np||9999);openPdf&&openPdf({slot:"script",start:pg||1,title:`Scene ${scene.number} script`});}catch{openPdf&&openPdf({slot:"script",start:1,title:"Script"});}}}/>
+      {scene.scriptText&&<IconBtn icon={Maximize2} size={17} dim title="Full-screen reading view (parsed text)" onClick={()=>setScriptFull(true)}/>}
+    </div>}>
     <ScriptPages scene={scene} bump={bump} onMark={markPage} off={+(meta?.scriptPageOffset||0)} sceneNums={sceneNums}/>
   </PanelShell>;
 
