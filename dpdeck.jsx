@@ -99,7 +99,11 @@ function tzOff(date,tz){try{const p=new Intl.DateTimeFormat("en-US",{timeZone:tz
 function dayNoonUTC(ymd){const [y,m,d]=ymd.split("-").map(Number);return new Date(Date.UTC(y,m-1,d,12));}
 function localToAbs(ymd,h,mn,tz){const [y,m,d]=ymd.split("-").map(Number);const off=tzOff(new Date(Date.UTC(y,m-1,d,12)),tz);return new Date(Date.UTC(y,m-1,d,h,mn)-off*6e4);}
 function fmtT(date,tz){if(!date||isNaN(date))return "--:--";try{return new Intl.DateTimeFormat("en-GB",{timeZone:tz,hour:"2-digit",minute:"2-digit",hour12:false}).format(date);}catch{return "--:--";}}
-function tMin(date,tz){if(!date||isNaN(date))return null;const s=fmtT(date,tz);if(s==="--:--")return null;const [h,m]=s.split(":").map(Number);return h*60+m;}
+function tMin(date,tz){if(!date||isNaN(date))return null;const s=fmtT(date,tz);if(s==="--:--")return null;const [h,m]=s.split(":").map(Number);return ((h%24)*60)+m;} // h%24: WKWebView emits "24:00" at midnight
+// minutes from local-midnight-of `ymd` (in tz) to `date`; stays monotonic across a tz day boundary
+// (a location far in longitude from the project tz can have sunset land after local midnight) so the
+// sun bar never collapses to a zero-width / backwards segment. For a same-tz day this equals tMin.
+function tMinAbs(date,ymd,tz){if(!date||isNaN(date)||!ymd)return null;try{const mid=localToAbs(ymd,0,0,tz);return Math.round((date.getTime()-mid.getTime())/6e4);}catch{return tMin(date,tz);}}
 const CARD=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
 function azC(a){let d=(a*180/PI+180)%360;if(d<0)d+=360;return {deg:d,card:CARD[Math.round(d/22.5)%16]};}
 function haversineKm(aLat,aLng,bLat,bLng){const R=6371,t=PI/180,dLa=(bLat-aLat)*t,dLo=(bLng-aLng)*t;const s=Math.sin(dLa/2)**2+Math.cos(aLat*t)*Math.cos(bLat*t)*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(s));}
@@ -181,13 +185,13 @@ async function exportFullBackup(){
   const p=await store.get("pb:project")||{};
   const data={"pb:project":p};
   const imgIds=new Set();
-  const addRefs=arr=>{for(const r of arr||[])if(typeof r==="string"&&!isImgUrl(r))imgIds.add(r);};
+  const addRefs=arr=>{for(const r of arr||[])if(typeof r==="string"&&!isImgUrl(r)&&!isR2Ref(r))imgIds.add(r);};
   for(const s of p.scenes||[])addRefs(s.refs);
   addRefs(p.look);
-  for(const l of p.locations||[]){addRefs(l.images);addRefs(l.plans);if(l.imgId&&!isImgUrl(l.imgId))imgIds.add(l.imgId);}
+  for(const l of p.locations||[]){addRefs(l.images);addRefs(l.plans);if(l.imgId&&!isImgUrl(l.imgId)&&!isR2Ref(l.imgId))imgIds.add(l.imgId);}
   const sketchIds=new Set();
   for(const s of p.scenes||[])for(const id of s.sketches||[])sketchIds.add(id);
-  for(const id of sketchIds){const sk=await store.get("pb:sketch:"+id);if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId))imgIds.add(sk.bgImgId);}}
+  for(const id of sketchIds){const sk=await store.get("pb:sketch:"+id);if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId)&&!isR2Ref(sk.bgImgId))imgIds.add(sk.bgImgId);}}
   for(const id of imgIds){const v=await store.get("pb:img:"+id);if(v)data["pb:img:"+id]=v;const f=await store.get("pb:imgfull:"+id);if(f)data["pb:imgfull:"+id]=f;}
   for(const k of (await store.list())){if(String(k).startsWith("pb:scriptink:"))data[k]=await store.get(k);}
   // Ground-truth document PDFs (script + schedule) ride the deck so they sync across devices.
@@ -347,10 +351,12 @@ function StoredImg({id,style,onClick}){
     if(isImgUrl(id)){setSrc(id);return;}
     if(isR2Ref(id)){setSrc(null);r2ThumbDataURL(id).then(d=>{if(on)setSrc(d);});return()=>{on=false;};}
     if(imgCache.has(id)){setSrc(imgCache.get(id));return;}
+    setSrc(null); // clear stale image when the id changes in place before the new one resolves
     store.get("pb:img:"+id).then(v=>{if(on&&v){imgCache.set(id,v);setSrc(v);}});
     return()=>{on=false;};
   },[id]);
-  if(!src)return <div style={{...style,background:c.bg2,display:"grid",placeItems:"center"}}><ImageIcon size={16} color={c.t2}/></div>;
+  // onClick rides the placeholder too, so a tap registers even before the image finishes loading
+  if(!src)return <div onClick={onClick} style={{...style,background:c.bg2,display:"grid",placeItems:"center",cursor:onClick?"pointer":undefined}}><ImageIcon size={16} color={c.t2}/></div>;
   return <img src={src} onClick={onClick} style={style} alt=""/>;
 }
 
@@ -384,7 +390,7 @@ async function r2Write(key,text){const res=await fetch(R2_BASE+"/write/"+encodeU
 /* Location photos use a hybrid store: a small thumbnail is embedded in the deck (works offline),
    and the full-resolution image lives as its own R2 object under pb:imgfull:{id}. The Lightbox
    fetches the full (authed) on demand and falls back to the embedded thumb offline. */
-const fullUrlCache=new Map();
+const fullUrlCache=new Map(); const FULL_CACHE_MAX=24;
 async function fullImageURL(id){
   if(typeof id!=="string"||isImgUrl(id))return null;
   if(fullUrlCache.has(id))return fullUrlCache.get(id);
@@ -392,7 +398,10 @@ async function fullImageURL(id){
   if(isR2Ref(id))key=id.slice(3)+".jpg";
   else{try{key=await store.get("pb:imgfull:"+id);}catch{}}
   if(!key){fullUrlCache.set(id,null);return null;}
-  try{const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(!res.ok)throw new Error("full "+res.status);const u=URL.createObjectURL(await res.blob());fullUrlCache.set(id,u);return u;}catch{return null;}
+  try{const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(key).replace(/%2F/g,"/"),{headers:r2Headers()});if(!res.ok)throw new Error("full "+res.status);const u=URL.createObjectURL(await res.blob());
+    // bound memory: revoke + drop the oldest blob URLs (Map keeps insertion order; the newest is what the Lightbox shows, so the evicted one is never the visible image)
+    while(fullUrlCache.size>=FULL_CACHE_MAX){const k=fullUrlCache.keys().next().value;const old=fullUrlCache.get(k);if(typeof old==="string"&&old.startsWith("blob:"))URL.revokeObjectURL(old);fullUrlCache.delete(k);}
+    fullUrlCache.set(id,u);return u;}catch{return null;}
 }
 async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();const s=JSON.stringify(b);await r2Write(DECK_KEY,s);try{await r2Write(DECK_META,JSON.stringify({ts:b.ts}));}catch{}await store.set("pb:synced_ts",b.ts);await store.set("pb:project_mtime",b.ts);try{await writeDailySnapshot(s,b.ts);}catch{}return s.length;}
 async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");const o=JSON.parse(t);await importFullBackup(o);await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());return o.ts||0;}
@@ -513,7 +522,9 @@ function assignPages(parsed,pageCount){
 }
 function applySchedule(existing,days){
   const asn=new Map();
-  days.forEach(d=>(d.scenes||[]).forEach((num,i)=>asn.set(numKey(num),{day:String(d.day||""),order:i+1,date:d.date||""})));
+  // first day a scene appears wins its per-scene badge (a scene split across days still lists on each
+  // day in the Days view, which reads days[] directly; the badge just shows the primary/first day).
+  days.forEach(d=>(d.scenes||[]).forEach((num,i)=>{const k=numKey(num);if(!asn.has(k))asn.set(k,{day:String(d.day||""),order:i+1,date:d.date||""});}));
   return existing.map(s=>{const a=asn.get(numKey(s.number));return a?{...s,shootDay:a.day,shootOrder:a.order,shootDate:a.date||s.shootDate||""}:{...s,shootDay:"",shootOrder:0};});
 }
 function diffSchedule(existing,days){
@@ -585,14 +596,13 @@ function deriveLocations(scenes,locations){
   return {scenes:outScenes,locations:locs,added,linked};
 }
 function applyCrew(existing,incoming){
-  const crew={camera:[...(existing.camera||[])],grip:[...(existing.grip||[])],electric:[...(existing.electric||[])]};
-  const maps={camera:new Map(),grip:new Map(),electric:new Map()};
-  for(const d of ["camera","grip","electric"])crew[d].forEach((m,i)=>maps[d].set((m.name||"").trim().toLowerCase(),i));
+  const crew={},maps={};
+  for(const dd of DEPTS){crew[dd.k]=[...(existing[dd.k]||[])];maps[dd.k]=new Map();crew[dd.k].forEach((m,i)=>maps[dd.k].set((m.name||"").trim().toLowerCase(),i));}
   let added=0,updated=0;
   for(const inc of incoming){
     const nm=(inc.name||"").trim();if(!nm)continue;
     let d=(inc.dept||"").trim().toLowerCase();
-    if(!["camera","grip","electric"].includes(d)){const r=(inc.role||"").toLowerCase();d=/grip|dolly/.test(r)?"grip":/electric|gaffer|spark|lamp|board op/.test(r)?"electric":"camera";}
+    if(!DEPTS.some(x=>x.k===d)){const r=(inc.role||"").toLowerCase();d=/grip|dolly/.test(r)?"grip":/electric|gaffer|spark|lamp|board op/.test(r)?"electric":/\b(sfx|fx|special effect|pyro|atmos|smoke|rain|wind|squib)\b/.test(r)?"sfx":"camera";}
     const v=f=>{const x=inc[f];return x==null?"":String(x).trim();};
     const rec={role:v("role"),pron:v("pron"),phone:v("phone"),email:v("email")};
     const i=maps[d].get(nm.toLowerCase());
@@ -798,12 +808,12 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title}){
 function SunBar({lat,lng,tz,date,hm}){
   const data=useMemo(()=>{if(!date)return null;try{const t=sunTimes(dayNoonUTC(date),+lat,+lng);t._hi=sunAboveWindow(dayNoonUTC(date),+lat,+lng,40);return t;}catch{return null;}},[lat,lng,date]);
   if(!data)return null;
-  const p={dawn:tMin(data.dawn,tz),sr:tMin(data.sunrise,tz),ge:tMin(data.goldEnd,tz),gs:tMin(data.goldStart,tz),ss:tMin(data.sunset,tz),dusk:tMin(data.dusk,tz)};
+  const p={dawn:tMinAbs(data.dawn,date,tz),sr:tMinAbs(data.sunrise,date,tz),ge:tMinAbs(data.goldEnd,date,tz),gs:tMinAbs(data.goldStart,date,tz),ss:tMinAbs(data.sunset,date,tz),dusk:tMinAbs(data.dusk,date,tz)};
   if(p.sr==null||p.ss==null)return null;
   const cl=x=>clamp(x==null?0:x,0,1440),pct=v=>v/1440*100;
   const NI="#0c0e13",TW=c.night,DA="#37597a",GO=c.accent;
   const segs=[[0,cl(p.dawn??p.sr),NI],[cl(p.dawn??p.sr),cl(p.sr),TW],[cl(p.sr),cl(p.ge??p.sr),GO],[cl(p.ge??p.sr),cl(p.gs??p.ss),DA],[cl(p.gs??p.ss),cl(p.ss),GO],[cl(p.ss),cl(p.dusk??p.ss),TW],[cl(p.dusk??p.ss),1440,NI]];
-  const hi=data._hi, hs=hi?tMin(hi.start,tz):null, he=hi?tMin(hi.end,tz):null;
+  const hi=data._hi, hs=hi?tMinAbs(hi.start,date,tz):null, he=hi?tMinAbs(hi.end,date,tz):null;
   return <div>
     <div style={{position:"relative",height:22,borderRadius:6,overflow:"hidden",border:`1px solid ${c.line}`}}>
       {segs.map(([a,b,col],i)=><div key={i} style={{position:"absolute",left:pct(a)+"%",width:pct(Math.max(0,b-a))+"%",top:0,bottom:0,background:col}}/>)}
@@ -1509,7 +1519,7 @@ function Capture({project,setProject,onFiled,onToast}){
 function dayLocation(scenes,locations){for(const s of scenes){const l=locations.find(x=>x.id===s.locationId);if(l&&l.lat!=null&&l.lat!=="")return l;}return null;}
 function DayCard({day,date,scenes,project,onOpen,today}){
   const loc=dayLocation(scenes,project.locations);
-  const gear=useMemo(()=>{const map={camera:new Set(),grip:new Set(),electric:new Set()};scenes.forEach(s=>s.gearTags.forEach(id=>{const g=project.gear.find(x=>x.id===id);if(g&&map[g.dept])map[g.dept].add(g.name);}));return map;},[scenes,project.gear]);
+  const gear=useMemo(()=>{const map=Object.fromEntries(DEPTS.map(d=>[d.k,new Set()]));scenes.forEach(s=>s.gearTags.forEach(id=>{const g=project.gear.find(x=>x.id===id);if(g&&map[g.dept])map[g.dept].add(g.name);}));return map;},[scenes,project.gear]);
   const hasGear=DEPTS.some(d=>gear[d.k].size);
   return <div style={{background:c.bg1,border:`1px solid ${today?c.accent:c.line}`,borderRadius:14,overflow:"hidden"}}>
     <div style={{padding:"13px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",background:today?c.accentSoft:"transparent"}}>
@@ -1764,10 +1774,13 @@ function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,open
 }
 function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFocused}){
   const [ed,setEd]=useState(null);
-  const [detail,setDetail]=useState(null);
+  const [detailId,setDetail]=useState(null);
   const [dropId,setDropId]=useState("");
+  // Derive the live location from its id (not a snapshot) so a cloud pull / edit while the detail
+  // page is open is reflected, and the Edit hand-off writes back the fresh object, not a stale copy.
+  const detail=detailId?(project.locations.find(x=>x.id===detailId)||null):null;
   // Deep-link from a scene's location chip: open the rich detail view, not the edit form.
-  useEffect(()=>{if(!focusLoc)return;const l=project.locations.find(x=>x.id===focusLoc);if(l)setDetail(l);onFocused&&onFocused();},[focusLoc]);
+  useEffect(()=>{if(!focusLoc)return;if(project.locations.some(x=>x.id===focusLoc))setDetail(focusLoc);onFocused&&onFocused();},[focusLoc]);
   const save=l=>setProject(p=>({...p,locations:l.id?p.locations.map(x=>x.id===l.id?l:x):[...p.locations,{...l,id:uid(),images:l.images||[],plans:l.plans||[]}]}));
   const del=id=>setProject(p=>({...p,locations:p.locations.filter(x=>x.id!==id),scenes:p.scenes.map(s=>s.locationId===id?{...s,locationId:""}:s)}));
   const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||""};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
@@ -1787,9 +1800,9 @@ function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFo
             onDragLeave={e=>{if(e.currentTarget===e.target)setDropId("");}}
             onDrop={e=>{e.preventDefault();e.stopPropagation();setDropId("");const files=[...(e.dataTransfer.files||[])].filter(x=>x.type.startsWith("image/"));if(files.length)addImagesToLoc(l.id,files);}}
             style={{background:c.bg1,border:`1px solid ${dropId===l.id?c.accent:c.line}`,borderRadius:13,overflow:"hidden",outline:dropId===l.id?`2px dashed ${c.accent}`:"none",outlineOffset:-2}}>
-            {hero?<StoredImg id={hero} style={{width:"100%",height:130,objectFit:"cover",display:"block",cursor:"pointer"}} onClick={()=>setDetail(l)}/>:<div style={{height:8}}/>}
+            {hero?<StoredImg id={hero} style={{width:"100%",height:130,objectFit:"cover",display:"block",cursor:"pointer"}} onClick={()=>setDetail(l.id)}/>:<div style={{height:8}}/>}
             <div style={{padding:14}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}><div style={{minWidth:0,cursor:"pointer"}} onClick={()=>setDetail(l)}><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{l.name}</div>{l.address&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,marginTop:2}}>{l.address}</div>}</div><div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>{earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" title="Google Earth fly-around" style={{color:c.t2,display:"flex"}}><Compass size={16}/></a>}{mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" title="Maps" style={{color:c.t2,display:"flex"}}><MapPin size={16}/></a>}<IconBtn icon={Settings} size={16} dim onClick={()=>setEd(l)}/></div></div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}><div style={{minWidth:0,cursor:"pointer"}} onClick={()=>setDetail(l.id)}><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{l.name}</div>{l.address&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,marginTop:2}}>{l.address}</div>}</div><div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>{earthHref&&<a href={earthHref} target="_blank" rel="noreferrer" title="Google Earth fly-around" style={{color:c.t2,display:"flex"}}><Compass size={16}/></a>}{mapsHref&&<a href={mapsHref} target="_blank" rel="noreferrer" title="Maps" style={{color:c.t2,display:"flex"}}><MapPin size={16}/></a>}<IconBtn icon={Settings} size={16} dim onClick={()=>setEd(l)}/></div></div>
               <div style={{display:"flex",gap:10,margin:"10px 0",alignItems:"center",flexWrap:"wrap"}}>{l.lat&&<TravelChip meta={project.meta} lat={l.lat} lng={l.lng}/>}{l.lat&&<WeatherInline lat={l.lat} lng={l.lng} date={date}/>}{l.images&&l.images.length>0&&<Chip color={c.t2}><ImageIcon size={11}/>{l.images.length}</Chip>}{l.plans&&l.plans.length>0&&<Chip color={c.t2}>{l.plans.length} plan{l.plans.length>1?"s":""}</Chip>}</div>
               {l.lat&&<SunBar lat={l.lat} lng={l.lng} tz={project.meta.tz} date={date}/>}
               <div style={{marginTop:11}}><Label style={{marginBottom:6}}>Scenes here{here.length?` · ${here.length}`:""}</Label>
@@ -2520,7 +2533,7 @@ export default function App(){
   const [info,setInfo]=useState(null);
   const [more,setMore]=useState(false);
   const [jump,setJump]=useState(false);
-  const [exp,setExp]=useState({mode:"full",depts:["camera","grip","electric"]});
+  const [exp,setExp]=useState({mode:"full",depts:DEPTS.map(d=>d.k)});
   const [pdfv,setPdfv]=useState(null);
   const [focusLoc,setFocusLoc]=useState(null);
   const [hasKey,setHasKey]=useState(false);
@@ -2572,9 +2585,16 @@ export default function App(){
     const checkPull=async()=>{
       if(!R2_KEY||pulling.current)return;
       try{
-        const meta=await remoteDeckMeta();
         const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
-        if(meta&&meta.ts&&meta.ts>localSynced&&localMtime<=localSynced&&!dirty.current){
+        // Unsynced local edits (e.g. an unload flush the browser dropped on mobile) — push them now.
+        // Focus is a foreground event, so this reliably recovers what the best-effort pagehide flush can miss.
+        if(localMtime>localSynced||dirty.current){
+          clearTimeout(pushTimer.current);setSync({state:"syncing",at:Date.now()});
+          try{await pushDeckToCloud();dirty.current=false;setSync({state:"synced",at:Date.now()});}catch{setSync({state:"error",at:Date.now()});}
+          return;
+        }
+        const meta=await remoteDeckMeta();
+        if(meta&&meta.ts&&meta.ts>localSynced&&!dirty.current){
           pulling.current=true;setSync({state:"syncing",at:Date.now()});
           await pullDeckFromCloud();
           skipPush.current=true;setProject(normalizeProject(await store.get("pb:project")));setTb(b=>b+1);
@@ -2722,7 +2742,7 @@ export default function App(){
             {exp.mode==="gear"&&<div style={{display:"flex",gap:6}}>{DEPTS.map(d=>{const on=exp.depts.includes(d.k);return <button key={d.k} onClick={()=>setExp(e=>({...e,depts:on?e.depts.filter(x=>x!==d.k):[...e.depts,d.k]}))} style={{padding:"8px 12px",borderRadius:8,border:`1px solid ${on?c.accent:c.line2}`,background:on?c.accentSoft:c.bg2,color:on?c.accent:c.t1,fontFamily:UI,fontSize:13,fontWeight:650,cursor:"pointer"}}>{d.label}</button>;})}</div>}
             <Btn kind="primary" size={13} onClick={()=>window.print()}><Printer size={16}/>Print / Save as PDF</Btn>
           </div>
-          <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:620,marginBottom:14}}>{exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then Print and Save as PDF.":"Gear pull: specialty gear by department, each with the scenes it is needed on. Toggle Camera / Grip / Electric above."}</div>
+          <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:620,marginBottom:14}}>{exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then Print and Save as PDF.":`Gear pull: specialty gear by department, each with the scenes it is needed on. Toggle ${DEPTS.map(d=>d.label).join(" / ")} above.`}</div>
           {exp.mode==="full"?<ExportDoc project={project}/>:<GearSheet project={project} depts={exp.depts}/>}
         </div>}
         {view==="import"&&<Import project={project} setProject={setProject} onToast={toastFn}/>}
