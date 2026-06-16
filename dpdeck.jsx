@@ -214,8 +214,8 @@ const isImgUrl=s=>typeof s==="string"&&/^https?:\/\//.test(s.trim());
 const toUrlArr=x=>!x?[]:(Array.isArray(x)?x:[x]).map(u=>String(u).trim()).filter(isImgUrl);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const todayISO=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;};
-const numKey=s=>(s||"").toUpperCase().replace(/\s+/g,"");
-function cmpNum(a,b){return (a||"").localeCompare(b||"",undefined,{numeric:true,sensitivity:"base"});}
+const numKey=s=>String(s??"").toUpperCase().replace(/\s+/g,"");
+function cmpNum(a,b){return String(a??"").localeCompare(String(b??""),undefined,{numeric:true,sensitivity:"base"});} // String() so a numeric scene number / shootDay from an external deck never throws
 
 function downscale(file,max=1600,q=0.82){
   return new Promise((res,rej)=>{
@@ -422,7 +422,7 @@ function mergeText(base,ours,theirs,om,tm){                   // notes: one-side
   if(a===bs)return b; if(b===bs)return a;
   const win=(tm>om)?b:a,lose=(tm>om)?a:b;
   if(!lose.trim()||win.indexOf(lose.trim())>=0)return win;
-  return win+"\n— also edited on another device —\n"+lose;
+  return win+"\n(also edited on another device:)\n"+lose;
 }
 const jeq=(x,y)=>JSON.stringify(x===undefined?null:x)===JSON.stringify(y===undefined?null:y);
 function pickField(base,ours,theirs,om,tm){                   // scalars: 3-way, tie -> newest by _mt (ours on equal)
@@ -800,7 +800,7 @@ function applyProjectFile(p,inc){
     if(Array.isArray(isc.refs)&&isc.refs.length){const have=new Set(s.refs);for(const r of isc.refs){if(r&&!have.has(r)){s.refs.push(r);have.add(r);}}}
   });
   let out={...p,meta:{...p.meta,...(inc.meta||{})},scenes,gear};
-  if(Array.isArray(inc.days)&&inc.days.length)out.scenes=applySchedule(out.scenes,inc.days);
+  if(Array.isArray(inc.days)&&inc.days.length){out.scenes=applySchedule(out.scenes,inc.days);out.days=inc.days;}  // persist the schedule (the Calendar reads project.days directly, so split scenes show on every day)
   if(Array.isArray(inc.locations)&&inc.locations.length)out.locations=applyLocations(out.locations,inc.locations).merged;
   if(Array.isArray(inc.scenes))out.scenes=linkLocations(out.scenes,inc.scenes,out.locations);
   if(Array.isArray(inc.crew)&&inc.crew.length)out.crew=applyCrew(out.crew,inc.crew).merged;
@@ -1029,6 +1029,44 @@ function SunCompass({lat,lng,tz,date,hm}){
     </div>
   </div>;
 }
+// Bird's-eye satellite map (Esri World Imagery, keyless) with a north-up sun overlay: the day's
+// sun-azimuth arc on the rim, the current sun ray (where light comes FROM) + glyph, and the shadow
+// direction. Lets you read where light hits a real window/wall against the actual geography.
+function SunMap({lat,lng,tz,date,hm,size=200}){
+  const [err,setErr]=useState(false);
+  useEffect(()=>{setErr(false);},[lat,lng]);
+  const sun=useMemo(()=>{try{const t=sunTimes(dayNoonUTC(date),+lat,+lng);const azOf=d=>d&&!isNaN(d)?azC(sunPos(d,+lat,+lng).az).deg:null;return {sr:azOf(t.sunrise),ss:azOf(t.sunset)};}catch{return null;}},[lat,lng,date]);
+  const cur=useMemo(()=>{try{const p=sunPos(localToAbs(date,Math.floor(hm/60),hm%60,tz),+lat,+lng);return {az:azC(p.az).deg,alt:p.alt*180/PI};}catch{return null;}},[lat,lng,tz,date,hm]);
+  if(lat==null||lat===""||lng==null||lng==="")return null;
+  const la=+lat,ln=+lng,D=110,dLat=D/111320,dLng=D/(111320*Math.cos(la*rad));
+  const bbox=`${(ln-dLng).toFixed(6)},${(la-dLat).toFixed(6)},${(ln+dLng).toFixed(6)},${(la+dLat).toFixed(6)}`;
+  const url=`https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export?bbox=${bbox}&bboxSR=4326&imageSR=3857&size=512,512&format=png24&f=image`;
+  const S=size,cc=S/2,R=S/2-3;
+  const pt=(deg,r)=>[cc+r*Math.sin(deg*rad),cc-r*Math.cos(deg*rad)];
+  const cardOf=deg=>CARD[Math.round((((deg%360)+360)%360)/22.5)%16];
+  let arcPath=null;
+  if(sun&&sun.sr!=null&&sun.ss!=null){const [ax,ay]=pt(sun.sr,R-3),[bx,by]=pt(sun.ss,R-3);const large=((sun.ss-sun.sr+360)%360)>180?1:0;arcPath=`M ${ax.toFixed(1)} ${ay.toFixed(1)} A ${R-3} ${R-3} 0 ${large} 1 ${bx.toFixed(1)} ${by.toFixed(1)}`;}
+  const sp=cur&&cur.alt>0?pt(cur.az,R-10):null;
+  const sh=cur&&cur.alt>1?pt((cur.az+180)%360,Math.min(R-14,(R*0.5)/Math.tan(Math.max(cur.alt,3)*rad)+10)):null;
+  const compass=(deg,t)=>{const [x,y]=pt(deg,R-12);return <text x={x.toFixed(1)} y={(y+3).toFixed(1)} textAnchor="middle" style={{fontFamily:MONO,fontSize:9,fontWeight:700,fill:"#fff"}} opacity={0.92}>{t}</text>;};
+  return <div style={{width:size,flexShrink:0}}>
+    <div style={{position:"relative",width:size,height:size,borderRadius:12,overflow:"hidden",border:`1px solid ${c.line2}`,background:c.bg2}}>
+      {!err?<img src={url} onError={()=>setErr(true)} width={size} height={size} style={{display:"block",width:size,height:size,objectFit:"cover"}} alt="satellite"/>:<div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",fontFamily:UI,fontSize:11,color:c.t2,textAlign:"center",padding:10}}>Satellite view offline (sun overlay still accurate)</div>}
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{position:"absolute",inset:0,pointerEvents:"none"}}>
+        <circle cx={cc} cy={cc} r={R} fill="none" stroke="#0007" strokeWidth={1}/>
+        {arcPath&&<path d={arcPath} fill="none" stroke="#ffd27a" strokeWidth={4} strokeLinecap="round" opacity={0.85}/>}
+        {sun&&sun.sr!=null&&(()=>{const [x,y]=pt(sun.sr,R-3);return <circle cx={x} cy={y} r={3.2} fill="#ffb24d" stroke="#000" strokeWidth={0.6}/>;})()}
+        {sun&&sun.ss!=null&&(()=>{const [x,y]=pt(sun.ss,R-3);return <circle cx={x} cy={y} r={3.2} fill={c.night} stroke="#000" strokeWidth={0.6}/>;})()}
+        {sh&&<line x1={cc} y1={cc} x2={sh[0].toFixed(1)} y2={sh[1].toFixed(1)} stroke="#000" strokeWidth={2.5} strokeDasharray="3 3" opacity={0.55}/>}
+        {sp&&<><line x1={cc} y1={cc} x2={sp[0].toFixed(1)} y2={sp[1].toFixed(1)} stroke="#ffd27a" strokeWidth={2}/><circle cx={sp[0].toFixed(1)} cy={sp[1].toFixed(1)} r={7} fill="#ffd27a" stroke="#a76a16" strokeWidth={1}/></>}
+        {cur&&cur.alt<=0&&<text x={cc} y={cc-5} textAnchor="middle" style={{fontFamily:UI,fontSize:10,fontWeight:700,fill:"#fff"}} opacity={0.85}>sun down</text>}
+        <circle cx={cc} cy={cc} r={4} fill="#fff" stroke="#000" strokeWidth={1.5}/>
+        {compass(0,"N")}{compass(90,"E")}{compass(180,"S")}{compass(270,"W")}
+      </svg>
+    </div>
+    {cur&&<div style={{fontFamily:UI,fontSize:11,color:c.t1,marginTop:5,lineHeight:1.5}}>{cur.alt>0?<>Light from <b style={{color:c.accent}}>{cardOf(cur.az)}</b> ({Math.round(cur.az)}°), {Math.round(cur.alt)}° up{cur.alt>1?<> · shadows {cardOf((cur.az+180)%360)}</>:null}</>:"Sun below horizon"}</div>}
+  </div>;
+}
 function SunPanel({lat,lng,tz,date}){
   const data=useMemo(()=>{if(!date)return null;try{return sunTimes(dayNoonUTC(date),+lat,+lng);}catch{return null;}},[lat,lng,date]);
   const [hm,setHm]=useState(15*60);
@@ -1050,7 +1088,10 @@ function SunPanel({lat,lng,tz,date}){
       <Cell ic={<Clock size={12} color={c.night}/>} l="Blue PM" t={data.dusk}/>
     </div>
     {dayLen&&<div style={{fontFamily:UI,fontSize:11.5,color:c.t2}}>Daylight {dayLen} · solar noon {fmtT(data.noon,tz)} · peak sun {Math.round(noonAlt)}°</div>}
-    <SunCompass lat={lat} lng={lng} tz={tz} date={date} hm={hm}/>
+    <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"flex-start"}}>
+      <SunMap lat={lat} lng={lng} tz={tz} date={date} hm={hm}/>
+      <SunCompass lat={lat} lng={lng} tz={tz} date={date} hm={hm}/>
+    </div>
     <div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8,flexWrap:"wrap"}}>
         <Label>Sun at {String(Math.floor(hm/60)).padStart(2,"0")}:{String(hm%60).padStart(2,"0")}</Label>
@@ -1698,9 +1739,18 @@ function DayCard({day,date,scenes,project,onOpen,today}){
   </div>;
 }
 function CalendarView({project,onOpen}){
-  const byDate=useMemo(()=>{const m=new Map();for(const s of project.scenes){if(s.status==="omitted"||!s.shootDay||!s.shootDate)continue;if(!m.has(s.shootDate))m.set(s.shootDate,{day:s.shootDay,scenes:[]});m.get(s.shootDate).scenes.push(s);}return m;},[project.scenes]);
+  const sceneByNum=useMemo(()=>{const m=new Map();for(const s of project.scenes)m.set(numKey(s.number),s);return m;},[project.scenes]);
+  // Source the calendar from the SCHEDULE (project.days) so EVERY scene listed to shoot a day shows,
+  // including split scenes that recur across days. Falls back to per-scene shootDate for older decks.
+  const byDate=useMemo(()=>{
+    const m=new Map();
+    const add=(date,day,num)=>{if(!date)return;let e=m.get(date);if(!e){e={day,scenes:[]};m.set(date,e);}if(!e.scenes.includes(num))e.scenes.push(num);};
+    if((project.days||[]).length){for(const d of project.days)for(const n of (d.scenes||[]))add(d.date,d.day,n);}
+    else for(const s of project.scenes){if(s.status==="omitted"||!s.shootDate)continue;add(s.shootDate,s.shootDay,s.number);}
+    return m;
+  },[project.days,project.scenes]);
   const dates=[...byDate.keys()].sort();
-  const [ym,setYm]=useState((dates[0]||todayISO()).slice(0,7));
+  const [ym,setYm]=useState((dates.find(d=>d>=todayISO())||dates[0]||todayISO()).slice(0,7));
   const [y,mo]=ym.split("-").map(Number);
   const firstDow=new Date(Date.UTC(y,mo-1,1)).getUTCDay();
   const dim=new Date(Date.UTC(y,mo,0)).getUTCDate();
@@ -1708,22 +1758,32 @@ function CalendarView({project,onOpen}){
   const ti=todayISO();
   const monthName=new Date(Date.UTC(y,mo-1,1)).toLocaleDateString(undefined,{month:"long",year:"numeric",timeZone:"UTC"});
   const shift=n=>{let mm=mo-1+n,yy=y;while(mm<0){mm+=12;yy--;}while(mm>11){mm-=12;yy++;}setYm(`${yy}-${String(mm+1).padStart(2,"0")}`);};
+  const sortNums=a=>[...a].sort(cmpNum);
   return <div>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
       <IconBtn icon={ChevronLeft} onClick={()=>shift(-1)} dim title="Previous month"/>
       <div style={{fontFamily:UI,fontSize:15,fontWeight:700,color:c.t0}}>{monthName}</div>
       <IconBtn icon={ChevronRight} onClick={()=>shift(1)} dim title="Next month"/>
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6,gridAutoRows:"minmax(78px,auto)"}}>
       {["Su","Mo","Tu","We","Th","Fr","Sa"].map(d=><div key={d} style={{textAlign:"center",fontFamily:MONO,fontSize:10,color:c.t2,padding:"2px 0"}}>{d}</div>)}
       {cells.map((d,i)=>{
         if(!d)return <div key={"e"+i}/>;
         const key=`${ym}-${String(d).padStart(2,"0")}`;const sh=byDate.get(key);const today=key===ti;
-        return <div key={key} onClick={()=>sh&&onOpen&&onOpen(sh.scenes[0].number)} style={{minHeight:62,borderRadius:9,border:`1px solid ${today?c.accent:c.line}`,background:sh?c.accentSoft:c.bg1,padding:"6px 7px",cursor:sh?"pointer":"default",display:"flex",flexDirection:"column",gap:2}}>
-          <div style={{fontFamily:MONO,fontSize:11,color:today?c.accent:c.t2,fontWeight:today?700:400}}>{d}</div>
-          {sh&&<><div style={{fontFamily:UI,fontSize:10.5,fontWeight:700,color:c.accent}}>Day {sh.day}</div><div style={{fontFamily:MONO,fontSize:9.5,color:c.t2}}>{sh.scenes.length} sc</div></>}
+        return <div key={key} style={{borderRadius:9,border:`1px solid ${today?c.accent:c.line}`,background:sh?c.accentSoft:c.bg1,padding:"5px 6px",display:"flex",flexDirection:"column",gap:3}}>
+          <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}>
+            <span style={{fontFamily:MONO,fontSize:11,color:today?c.accent:c.t2,fontWeight:today?700:400}}>{d}</span>
+            {sh&&<span style={{fontFamily:UI,fontSize:9.5,fontWeight:700,color:c.accent}}>D{sh.day}</span>}
+          </div>
+          {sh&&<div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+            {sortNums(sh.scenes).map(n=>{const s=sceneByNum.get(numKey(n));const col=s?dnColor(s.dayNight):c.t2;return <button key={n} title={s?`${s.slug} ${s.set} ${s.dayNight||""}`.trim():`Scene ${n}`} onClick={()=>onOpen&&onOpen(n)} style={{fontFamily:MONO,fontSize:9.5,fontWeight:700,color:c.t0,background:c.bg2,border:`1px solid ${c.line2}`,borderLeft:`2.5px solid ${col}`,borderRadius:4,padding:"1px 4px",cursor:"pointer",lineHeight:1.35}}>{n}</button>;})}
+          </div>}
         </div>;
       })}
+    </div>
+    <div style={{display:"flex",gap:12,marginTop:10,flexWrap:"wrap",fontFamily:UI,fontSize:10.5,color:c.t2}}>
+      {DAYNIGHT.map(dn=><span key={dn} style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:dnColor(dn)}}/>{dn}</span>)}
+      <span style={{color:c.t2}}>· tap a scene to open it</span>
     </div>
   </div>;
 }
@@ -1745,32 +1805,114 @@ function Days({project,onOpen}){
     </>}
   </div>;
 }
+// HOME — a prep-and-shoot dashboard: at-a-glance status, the day in front of you with the light,
+// prep readiness, and the locations/look you live in. Designed to be the first thing worth opening.
 function Dashboard({project,onOpen,onNav}){
   const ti=todayISO();
-  const present=project.scenes.filter(s=>s.status!=="omitted"&&s.shootDay);
-  const dayList=groupBy([...present].sort((a,b)=>(a.shootOrder||0)-(b.shootOrder||0)),s=>s.shootDay).map(([day,scenes])=>({day,scenes,date:scenes.find(s=>s.shootDate)?.shootDate||""}));
+  const meta=project.meta||{};
+  const present=project.scenes.filter(s=>s.status!=="omitted");
+  const scheduled=present.filter(s=>s.shootDay);
+  const dayList=groupBy([...scheduled].sort((a,b)=>(a.shootOrder||0)-(b.shootOrder||0)),s=>s.shootDay).map(([day,scenes])=>({day,scenes,date:scenes.find(s=>s.shootDate)?.shootDate||""}));
   dayList.sort((a,b)=>cmpNum(a.day,b.day));
-  const today=dayList.find(d=>d.date===ti);
-  const upcoming=dayList.filter(d=>d.date&&d.date>ti).slice(0,3);
-  const crew=project.crew||{camera:[],grip:[],electric:[]};
-  const crewCount=DEPTS.reduce((n,d)=>n+(crew[d.k]||[]).length,0);
-  const Hero=({d,big})=>{const loc=dayLocation(d.scenes,project.locations);return <div style={{background:c.bg1,border:`1px solid ${big?c.accent:c.line}`,borderRadius:14,overflow:"hidden"}}>
-    <div style={{padding:"13px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",alignItems:"center",gap:11,flexWrap:"wrap",background:big?c.accentSoft:"transparent"}}>
-      <span style={{fontFamily:UI,fontSize:11,fontWeight:700,color:c.t2}}>DAY</span><span style={{fontFamily:MONO,fontSize:big?24:18,fontWeight:700,color:c.accent}}>{d.day}</span>
-      {big&&<Chip color={c.accent} active>TODAY</Chip>}
-      {d.date&&<Val size={13} style={{color:c.t1}}>{new Date(d.date+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}</Val>}
-      <div style={{flex:1}}/>{loc&&<Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip>}
-    </div>
-    {big&&loc&&loc.lat&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,gap:10,flexWrap:"wrap"}}><WeatherInline lat={loc.lat} lng={loc.lng} date={d.date}/><TravelChip meta={project.meta} lat={loc.lat} lng={loc.lng}/></div><SunBar lat={loc.lat} lng={loc.lng} tz={project.meta.tz} date={d.date}/></div>}
-    <div style={{padding:"10px 12px",display:"flex",flexWrap:"wrap",gap:6}}>{d.scenes.map(s=><button key={s.number} onClick={()=>onOpen(s.number)} style={{fontFamily:MONO,fontSize:13,fontWeight:700,color:c.accent,background:c.accentSoft,border:`1px solid ${c.accent}55`,borderRadius:7,padding:"5px 10px",cursor:"pointer"}}>{s.number}</button>)}</div>
-  </div>;};
+  const datedDays=dayList.filter(d=>d.date).sort((a,b)=>a.date<b.date?-1:1);
+  const today=dayList.find(d=>d.date===ti)||null;
+  const nextDay=today||datedDays.find(d=>d.date>=ti)||null;
+  const upcoming=datedDays.filter(d=>d.date>ti).slice(0,3);
+  const shootStart=datedDays[0]?.date||"";
+  const shootEnd=datedDays[datedDays.length-1]?.date||"";
+  const daysToStart=shootStart?Math.round((new Date(shootStart+"T12:00")-new Date(ti+"T12:00"))/864e5):null;
+  const totalEighths=present.reduce((n,s)=>n+(+s.eighths||0),0);
+  const pages=Math.round(totalEighths/8*10)/10;
+  const locs=project.locations||[];
+  const locGps=locs.filter(l=>l.lat&&l.lng).length;
+  const crew=project.crew||{};
+  const crewCount=DEPTS.reduce((n,d)=>n+((crew[d.k]||[]).length),0);
+  const sc=STATUS.map(st=>({...st,n:present.filter(s=>(s.status||"todo")===st.k).length}));
+  const look=(project.look||[]);
+  const fmtD=d=>d?new Date(d+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}):"";
+  const statusLine=today?`Today is a shoot day — Day ${today.day}`:(daysToStart!=null&&daysToStart>0?`${daysToStart} day${daysToStart>1?"s":""} to Day 1 · principal photography starts ${fmtD(shootStart)}`:(shootEnd&&ti>shootEnd?"Production wrapped":(nextDay?`Next shoot: Day ${nextDay.day} on ${fmtD(nextDay.date)}`:"No schedule loaded yet")));
+
+  const Stat=({n,label,sub,nav})=><button onClick={nav?()=>onNav(nav):undefined} style={{flex:"1 1 92px",minWidth:92,textAlign:"left",background:c.bg1,border:`1px solid ${c.line}`,borderRadius:12,padding:"11px 13px",cursor:nav?"pointer":"default"}}>
+    <div style={{fontFamily:MONO,fontSize:23,fontWeight:700,color:c.t0,lineHeight:1.1}}>{n}</div>
+    <div style={{fontFamily:UI,fontSize:11,color:c.t2,marginTop:2}}>{label}</div>
+    {sub&&<div style={{fontFamily:UI,fontSize:10.5,color:c.t2,marginTop:1}}>{sub}</div>}
+  </button>;
+
+  const DayHero=({d,big})=>{
+    const loc=dayLocation(d.scenes,locs);
+    const t=(loc&&loc.lat)?(()=>{try{return sunTimes(dayNoonUTC(d.date),+loc.lat,+loc.lng);}catch{return null;}})():null;
+    const e8=d.scenes.reduce((n,s)=>n+(+s.eighths||0),0);
+    const golden=({l,v})=><div style={{minWidth:48}}><div style={{fontFamily:UI,fontSize:9.5,color:c.t2}}>{l}</div><div style={{fontFamily:MONO,fontSize:12.5,color:c.t0}}>{v}</div></div>;
+    return <div style={{background:c.bg1,border:`1px solid ${big?c.accent:c.line}`,borderRadius:14,overflow:"hidden"}}>
+      <div style={{padding:"12px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:big?c.accentSoft:"transparent"}}>
+        <span style={{fontFamily:UI,fontSize:11,fontWeight:700,color:c.t2}}>DAY</span><span style={{fontFamily:MONO,fontSize:big?24:19,fontWeight:700,color:c.accent}}>{d.day}</span>
+        {big&&<Chip color={c.accent} active>TODAY</Chip>}
+        {d.date&&<Val size={13} style={{color:c.t1}}>{fmtD(d.date)}</Val>}
+        <div style={{flex:1}}/>
+        <span style={{fontFamily:MONO,fontSize:11.5,color:c.t2}}>{d.scenes.length} sc{e8?` · ${fmtEighths(e8)} pg`:""}</span>
+        {loc&&<Chip color={c.t1} onClick={()=>onOpen("__loc__"+loc.id)}><MapPin size={11}/>{loc.name}</Chip>}
+      </div>
+      {big&&loc&&loc.lat&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",flexDirection:"column",gap:9}}>
+        {t&&<div style={{display:"flex",gap:14,flexWrap:"wrap"}}>{golden({l:"Sunrise",v:fmtT(t.sunrise,meta.tz)})}{golden({l:"Gold AM",v:fmtT(t.goldEnd,meta.tz)})}{golden({l:"Gold PM",v:fmtT(t.goldStart,meta.tz)})}{golden({l:"Sunset",v:fmtT(t.sunset,meta.tz)})}</div>}
+        <SunBar lat={loc.lat} lng={loc.lng} tz={meta.tz} date={d.date}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}><WeatherInline lat={loc.lat} lng={loc.lng} date={d.date}/><TravelChip meta={meta} lat={loc.lat} lng={loc.lng}/></div>
+      </div>}
+      <div style={{padding:"7px 9px",display:"flex",flexDirection:"column",gap:3}}>
+        {d.scenes.map(s=>{const st=STATUS.find(x=>x.k===(s.status||"todo"));return <button key={s.number} onClick={()=>onOpen(s.number)} style={{display:"flex",alignItems:"center",gap:9,padding:"7px 9px",background:"transparent",border:"none",borderRadius:8,cursor:"pointer",textAlign:"left"}}>
+          <span style={{fontFamily:MONO,fontSize:13.5,fontWeight:700,color:slugColor(s.slug),minWidth:34}}>{s.number}</span>
+          <span style={{flex:1,minWidth:0,fontFamily:UI,fontSize:12.5,color:c.t1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.set||s.syn||""}</span>
+          {s.dayNight&&<Tag label={s.dayNight} color={dnColor(s.dayNight)}/>}
+          {s.eighths>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2,flexShrink:0}}>{fmtEighths(s.eighths)}</span>}
+          <span title={st?.label} style={{width:8,height:8,borderRadius:"50%",background:st?.color||c.t2,flexShrink:0}}/>
+        </button>;})}
+      </div>
+    </div>;
+  };
+
+  const locBoard=[...locs].map(l=>({l,n:project.scenes.filter(s=>s.locationId===l.id&&s.status!=="omitted").length,d:nextDateForLoc(project.scenes,l.id)})).filter(x=>x.n>0).sort((a,b)=>(a.d||"9999")<(b.d||"9999")?-1:1).slice(0,8);
+
   return <div style={{display:"flex",flexDirection:"column",gap:16,maxWidth:980}}>
-    {today?<Hero d={today} big/>:<div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:14,padding:"15px 16px",fontFamily:UI,fontSize:13.5,color:c.t1}}>No shoot scheduled today ({ti}).{upcoming[0]?` Next: Day ${upcoming[0].day}${upcoming[0].date?" on "+new Date(upcoming[0].date+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}):""}.`:""}</div>}
-    {upcoming.length>0&&<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>Next up</Label><button onClick={()=>onNav("days")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Full schedule →</button></div><div style={{display:"flex",flexDirection:"column",gap:9}}>{upcoming.map(d=><Hero key={d.day} d={d}/>)}</div></div>}
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:13}}>
+    <div>
+      <div style={{fontFamily:UI,fontSize:20,fontWeight:700,color:c.t0}}>{meta.title||"The Painted Bride"}</div>
+      <div style={{fontFamily:UI,fontSize:13,color:c.accent,marginTop:2,fontWeight:600}}>{statusLine}</div>
+    </div>
+
+    <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+      <Stat n={present.length} label="scenes" nav="scenes"/>
+      <Stat n={dayList.length} label="shoot days" nav="days"/>
+      <Stat n={pages} label="pages" sub={`${fmtEighths(totalEighths)||"0"} eighths`}/>
+      <Stat n={locs.length} label="locations" sub={`${locGps} with GPS`} nav="locations"/>
+      <Stat n={crewCount} label="crew" nav="crew"/>
+    </div>
+
+    {present.length>0&&<div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:9}}><Label>Prep status</Label><span style={{fontFamily:MONO,fontSize:11,color:c.t2}}>{sc.find(x=>x.k==="ready")?.n+sc.find(x=>x.k==="shot")?.n||0}/{present.length} ready</span></div>
+      <div style={{display:"flex",height:9,borderRadius:5,overflow:"hidden",background:c.bg2,marginBottom:9}}>{sc.map(x=>x.n?<div key={x.k} title={`${x.label}: ${x.n}`} style={{width:`${x.n/present.length*100}%`,background:x.color}}/>:null)}</div>
+      <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>{sc.map(x=><div key={x.k} style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:9,height:9,borderRadius:2,background:x.color}}/><span style={{fontFamily:UI,fontSize:11.5,color:c.t1}}>{x.label}</span><span style={{fontFamily:MONO,fontSize:11.5,color:c.t2}}>{x.n}</span></div>)}</div>
+    </div>}
+
+    {nextDay?<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>{today?"Today":"Next shoot day"}</Label><button onClick={()=>onNav("days")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Full schedule →</button></div><DayHero d={nextDay} big={!!today}/></div>
+      :<div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:14,padding:"15px 16px",fontFamily:UI,fontSize:13.5,color:c.t1}}>No shoot schedule loaded yet. Drop the schedule in Import, or hand Claude the call sheet.</div>}
+
+    {upcoming.length>0&&<div><Label style={{marginBottom:7}}>Then</Label><div style={{display:"flex",flexDirection:"column",gap:7}}>{upcoming.map(d=>{const loc=dayLocation(d.scenes,locs);return <button key={d.day} onClick={()=>onOpen(d.scenes[0]?.number)} style={{display:"flex",alignItems:"center",gap:11,background:c.bg1,border:`1px solid ${c.line}`,borderRadius:11,padding:"9px 13px",cursor:"pointer",textAlign:"left"}}>
+      <span style={{fontFamily:MONO,fontSize:15,fontWeight:700,color:c.accent,minWidth:30}}>{d.day}</span>
+      <div style={{minWidth:78}}><div style={{fontFamily:UI,fontSize:12,color:c.t1}}>{fmtD(d.date)}</div><div style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{d.scenes.length} sc</div></div>
+      {loc&&<Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip>}<div style={{flex:1}}/><ChevronRight size={16} color={c.t2}/>
+    </button>;})}</div></div>}
+
+    {locBoard.length>0&&<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>Locations up next</Label><button onClick={()=>onNav("locations")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>All {locs.length} →</button></div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10}}>{locBoard.map(({l,n,d})=>{const hero=l.imgId||(l.images&&l.images[0]);return <button key={l.id} onClick={()=>onOpen("__loc__"+l.id)} style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:11,overflow:"hidden",cursor:"pointer",textAlign:"left",padding:0}}>
+        {hero?<StoredImg id={hero} style={{width:"100%",height:78,objectFit:"cover",display:"block"}}/>:<div style={{height:78,background:c.bg2,display:"grid",placeItems:"center"}}><MapPin size={18} color={c.t2}/></div>}
+        <div style={{padding:"8px 10px"}}><div style={{fontFamily:UI,fontSize:13,fontWeight:600,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</div><div style={{fontFamily:MONO,fontSize:10.5,color:c.t2,marginTop:2,display:"flex",gap:7}}><span>{n} sc</span>{l.lat?<span style={{color:c.ok}}>GPS</span>:<span style={{color:c.warn}}>no GPS</span>}{d&&<span>{fmtD(d).replace(/^\w+, /,"")}</span>}</div></div>
+      </button>;})}</div></div>}
+
+    {look.length>0&&<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>Look</Label><button onClick={()=>onNav("look")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
+      <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:3}}>{look.slice(0,10).map((id,i)=><div key={i} style={{flexShrink:0}}><StoredImg id={id} style={{width:120,height:80,objectFit:"cover",borderRadius:8,display:"block"}}/></div>)}</div></div>}
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:13}}>
       <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><Label>Crew</Label><button onClick={()=>onNav("crew")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
-        {crewCount===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet. Feed Claude the call sheet.</div>:DEPTS.map(d=>(crew[d.k]||[]).length?<div key={d.k} style={{display:"flex",gap:8,marginBottom:6,alignItems:"baseline"}}><span style={{fontFamily:MONO,fontSize:10,color:c.t2,minWidth:58}}>{d.label}</span><span style={{fontFamily:UI,fontSize:12.5,color:c.t1}}>{(crew[d.k]||[]).map(m=>m.name).join(", ")}</span></div>:null)}
+        {crewCount===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet. Feed Claude the call sheet.</div>:DEPTS.map(d=>(crew[d.k]||[]).length?<div key={d.k} style={{display:"flex",gap:8,marginBottom:6,alignItems:"baseline"}}><span style={{fontFamily:MONO,fontSize:10,color:c.t2,minWidth:64}}>{d.label}</span><span style={{fontFamily:UI,fontSize:12.5,color:c.t1}}>{(crew[d.k]||[]).map(m=>m.name).join(", ")}</span></div>:null)}
       </div>
       <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><Label>Key contacts</Label><button onClick={()=>onNav("contacts")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
@@ -2136,7 +2278,7 @@ function ImportPane({kind,project,setProject,onToast}){
   };
   const apply=()=>{
     if(review.kind==="script"){setProject(p=>{let sc=attachRefs(applyScript(p.scenes,review.parsed),review.parsed);sc=linkLocations(sc,review.parsed,p.locations);const d=deriveLocations(sc,p.locations);return {...p,scenes:d.scenes,locations:d.locations};});onToast(`Script merged · ${review.diff.added.length} new, ${review.diff.omitted.length} cut`);}
-    else{setProject(p=>({...p,scenes:applySchedule(p.scenes,review.days)}));onToast(`Schedule applied · ${review.diff.days} days`);}
+    else{setProject(p=>({...p,days:review.days,scenes:applySchedule(p.scenes,review.days)}));onToast(`Schedule applied · ${review.diff.days} days`);}
     setReview(null);
   };
   const loadJSON=(src)=>{
@@ -2437,7 +2579,7 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
       </div>
       <div style={{fontFamily:MONO,fontSize:10.5,color:c.t2,marginBottom:14}}>{lastBk?`Last download backup: ${new Date(lastBk).toLocaleDateString()}`:"No download backup taken yet."}{R2_KEY?" · cloud snapshots: on":" · cloud snapshots: off"}</div>
       {!wipe?<Btn kind="danger" size={12} onClick={()=>setWipe(true)}><Trash2 size={15}/>Erase everything</Btn>:
-        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to — turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:scriptname","pb:doc:schedulename","pb:snap_day"])await store.del(k);location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
+        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:scriptname","pb:doc:schedulename","pb:snap_day"])await store.del(k);location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
     </Card>
     <div style={{textAlign:"center",fontFamily:MONO,fontSize:10.5,color:c.t2,padding:"4px 0 12px"}}>DP DECK · prep + shoot · one film</div>
   </div>;
@@ -2646,14 +2788,14 @@ function Documents({openPdf,onToast}){
 }
 
 /* APP */
-const DEFAULT_PROJECT=()=>({meta:{title:"Untitled Film",baseName:"",baseLat:"",baseLng:"",avgKmh:28,tz:(Intl.DateTimeFormat().resolvedOptions().timeZone)||"UTC",theme:"dark"},scenes:[],locations:[],crew:{camera:[],grip:[],electric:[]},contacts:[],gear:[],inbox:[],look:[],lookNotes:""});
+const DEFAULT_PROJECT=()=>({meta:{title:"Untitled Film",baseName:"",baseLat:"",baseLng:"",avgKmh:28,tz:(Intl.DateTimeFormat().resolvedOptions().timeZone)||"UTC",theme:"dark"},scenes:[],days:[],locations:[],crew:{camera:[],grip:[],electric:[]},contacts:[],gear:[],inbox:[],look:[],lookNotes:""});
 function normalizeProject(p){
   if(!p||typeof p!=="object")p=DEFAULT_PROJECT();
   p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};
-  p.scenes=(p.scenes||[]).map(s=>{const m={...emptyScene(s.number),...s};for(const k of ["refs","shots","gearTags","sketches","aiGear"])if(!Array.isArray(m[k]))m[k]=[];return m;});
+  p.scenes=(p.scenes||[]).map(s=>{const m={...emptyScene(s.number),...s};for(const k of ["refs","shots","gearTags","sketches","aiGear"])if(!Array.isArray(m[k]))m[k]=[];m.number=String(m.number??"");m.shootDay=m.shootDay==null?"":String(m.shootDay);return m;}); // coerce number/shootDay so an external/AI deck with numeric values can't crash sorts
   p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));
   p.crew={camera:[],grip:[],electric:[],sfx:[],...(p.crew||{})};
-  p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];p.lookNotes=p.lookNotes||"";
+  p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];p.lookNotes=p.lookNotes||"";p.days=Array.isArray(p.days)?p.days:[];
   return p;
 }
 const NAV=[
@@ -2883,7 +3025,7 @@ export default function App(){
           {sbLoc&&<Chip color={c.t1} onClick={()=>openScene("__loc__"+sbLoc.id)}><MapPin size={11}/>{sbLoc.name.length>24?sbLoc.name.slice(0,23)+"…":sbLoc.name}</Chip>}
           <div style={{flex:1,minWidth:6}}/>
           <div style={{display:"flex",flexShrink:0,borderRadius:8,overflow:"hidden",border:`1px solid ${c.line2}`}}>
-            {[{k:"story",l:"Story"},{k:"shoot",l:"Shoot"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} title={o.k==="story"?"Story order":"Shooting order — sets prev/next order"} style={{padding:"6px 10px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:11.5,fontWeight:700,cursor:"pointer"}}>{o.l}</button>)}
+            {[{k:"story",l:"Story"},{k:"shoot",l:"Shoot"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} title={o.k==="story"?"Story order":"Shooting order (sets prev/next order)"} style={{padding:"6px 10px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:11.5,fontWeight:700,cursor:"pointer"}}>{o.l}</button>)}
           </div>
           {neighbors&&<div style={{display:"flex",gap:4,flexShrink:0}}><IconBtn icon={ChevronLeft} size={18} onClick={()=>neighbors.prev&&openScene(neighbors.prev)} dim title="Previous scene" style={{opacity:neighbors.prev?1:0.3}}/><IconBtn icon={ChevronRight} size={18} onClick={()=>neighbors.next&&openScene(neighbors.next)} dim title="Next scene" style={{opacity:neighbors.next?1:0.3}}/></div>}
           <IconBtn icon={Settings} onClick={()=>setInfo(curScene)} dim title="Edit scene info"/>
@@ -2898,7 +3040,7 @@ export default function App(){
           </div>}
         </>
       )}
-      {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error — will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
+      {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error, will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
         {sync.state==="syncing"||sync.state==="pending"?<RefreshCw size={15} color={c.accent}/>:sync.state==="error"?<Cloud size={15}/>:<CheckCircle2 size={15} color={c.ok}/>}
         {wide&&<span>{sync.state==="syncing"||sync.state==="pending"?"Syncing":sync.state==="error"?"Sync off":"Synced"}</span>}
       </div>}
