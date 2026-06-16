@@ -170,7 +170,7 @@ async function dedupeImages(){
     p.scenes=(p.scenes||[]).map(s=>({...s,refs:fix(s.refs)}));
     p.look=fix(p.look);
     p.locations=(p.locations||[]).map(l=>({...l,images:fix(l.images),plans:fix(l.plans),imgId:remap.get(l.imgId)||l.imgId}));
-    await store.set("pb:project",p);
+    await store.set("pb:project",p);await store.set("pb:base_snapshot",p);
   }
   for(const k of (await store.list())){if(String(k).startsWith("pb:sketch:")){const sk=await store.get(k);if(sk&&sk.bgImgId&&remap.get(sk.bgImgId)){sk.bgImgId=remap.get(sk.bgImgId);await store.set(k,sk);}}}
   for(const dupId of remap.keys()){await store.del("pb:img:"+dupId);imgCache.delete(dupId);}
@@ -205,6 +205,7 @@ async function importFullBackup(obj){
   // (e.g. storage quota) leaves the previous deck intact rather than half-overwritten.
   for(const [k,v] of Object.entries(obj.data)){if(k==="pb:project")continue;await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}
   await store.set("pb:project",obj.data["pb:project"]);
+  await store.set("pb:base_snapshot",obj.data["pb:project"]);   // keep the 3-way merge ancestor in lockstep (restore / backup / pull / merge)
 }
 
 /* ---- utils ------------------------------------------------------- */
@@ -403,8 +404,159 @@ async function fullImageURL(id){
     while(fullUrlCache.size>=FULL_CACHE_MAX){const k=fullUrlCache.keys().next().value;const old=fullUrlCache.get(k);if(typeof old==="string"&&old.startsWith("blob:"))URL.revokeObjectURL(old);fullUrlCache.delete(k);}
     fullUrlCache.set(id,u);return u;}catch{return null;}
 }
-async function pushDeckToCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const b=await exportFullBackup();const s=JSON.stringify(b);await r2Write(DECK_KEY,s);try{await r2Write(DECK_META,JSON.stringify({ts:b.ts}));}catch{}await store.set("pb:synced_ts",b.ts);await store.set("pb:project_mtime",b.ts);try{await writeDailySnapshot(s,b.ts);}catch{}return s.length;}
-async function pullDeckFromCloud(){if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");const o=JSON.parse(t);await importFullBackup(o);await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());return o.ts||0;}
+/* ---- SAFE MERGE-ON-PUSH (3-way, additive-biased) ------------------------------
+   A device NEVER blindly overwrites the cloud deck. Before pushing, if the cloud has
+   changes this device hasn't seen, it re-pulls and MERGES against a stored ancestor
+   (pb:base_snapshot = the project as of the last sync), so no edit on any device is lost:
+   - additive fields (notes/shots/sketches/refs/gear/crew/contacts/look/plans/inbox) UNION;
+   - the scene spine is the UNION of scene numbers (a stale 136-scene device can't drop 140);
+   - scalar/bulk fields (status, slug, schedule, location links, images, days) resolve to
+     whichever side changed vs the ancestor; a true both-changed tie is broken by per-scene
+     `_mt` (newest wins). Location photos resolve to the changed/newer set (no r2-vs-embedded
+     duplicates). Without an ancestor yet (a device's first sync on this version) it stays
+     additive + prefers the newer remote for bulk fields, which still prevents data loss. */
+const mtOf=x=>(x&&typeof x._mt==="number")?x._mt:0;
+function mergeText(base,ours,theirs,om,tm){                   // notes: one-side-unchanged is clean; both-changed -> newest wins, keep the other if it has unique text (no silent loss, no line resurrection)
+  const a=ours||"",b=theirs||"",bs=base||"";
+  if(a===b)return a;
+  if(a===bs)return b; if(b===bs)return a;
+  const win=(tm>om)?b:a,lose=(tm>om)?a:b;
+  if(!lose.trim()||win.indexOf(lose.trim())>=0)return win;
+  return win+"\n— also edited on another device —\n"+lose;
+}
+const jeq=(x,y)=>JSON.stringify(x===undefined?null:x)===JSON.stringify(y===undefined?null:y);
+function pickField(base,ours,theirs,om,tm){                   // scalars: 3-way, tie -> newest by _mt (ours on equal)
+  if(jeq(ours,theirs))return ours;
+  if(base!==undefined){if(jeq(ours,base))return theirs;if(jeq(theirs,base))return ours;}
+  return tm>om?theirs:ours;
+}
+function pickBulk(base,ours,theirs){                          // images/days/lookNotes: 3-way, no-base -> non-empty / newer remote
+  if(jeq(ours,theirs))return ours;
+  if(base!==undefined){if(jeq(ours,base))return theirs;if(jeq(theirs,base))return ours;}
+  const empty=v=>v==null||(Array.isArray(v)&&!v.length)||v==="";
+  if(empty(theirs)&&!empty(ours))return ours;
+  if(empty(ours)&&!empty(theirs))return theirs;
+  return theirs;                                              // both non-empty, no base: prefer the newer remote deck
+}
+// 3-way list merge honoring add + edit + DELETE. An item in the ancestor but gone from one side
+// (and unchanged on the other) STAYS deleted; an item only one side has vs the ancestor was added and
+// is kept; edit-vs-delete keeps the edit. No ancestor (base not an array) -> additive union (never drop).
+// mergeItem(base,ours,theirs) merges an item present on both sides.
+function merge3List(base,ours,theirs,keyFn,mergeItem){
+  ours=ours||[];theirs=theirs||[];const hasBase=Array.isArray(base);
+  const bm=new Map((base||[]).map(x=>[keyFn(x),x])),om=new Map(ours.map(x=>[keyFn(x),x])),tm=new Map(theirs.map(x=>[keyFn(x),x]));
+  const out=[],seen=new Set(),order=[...ours.map(keyFn),...theirs.map(keyFn).filter(k=>!om.has(k))];
+  for(const k of order){
+    if(seen.has(k))continue;seen.add(k);
+    const o=om.get(k),t=tm.get(k);
+    if(o!==undefined&&t!==undefined)out.push(mergeItem?mergeItem(bm.get(k),o,t):o);
+    else if(o!==undefined){if(!(hasBase&&bm.has(k)&&jeq(o,bm.get(k))))out.push(o);}   // theirs deleted: honor iff ours unchanged
+    else if(t!==undefined){if(!(hasBase&&bm.has(k)&&jeq(t,bm.get(k))))out.push(t);}   // ours deleted: honor iff theirs unchanged
+  }
+  return out;
+}
+function mergeShot(b,o,t){const bb=b||{};return {...o,done:pickField(bb.done,o.done,t.done,0,0),text:pickField(bb.text,o.text,t.text,0,0)};} // per-field 3-way: the side that changed vs the ancestor wins (an unchanged side never overrides an edit, incl. a shortening or an uncheck)
+const mergePerson=fields=>(b,o,t)=>{const r={...t,...o};for(const f of fields)r[f]=pickField((b||{})[f],o[f],t[f],0,0);return r;}; // field-3-way; prefer the changed side
+function mergeScene(base,ours,theirs){
+  const om=mtOf(ours),tm=mtOf(theirs),b=base||{},o={...ours};
+  o.notes=mergeText(b.notes,ours.notes,theirs.notes,om,tm);
+  o.shots=merge3List(base&&base.shots,ours.shots,theirs.shots,x=>x.id||x.text,mergeShot);
+  o.refs=merge3List(base&&base.refs,ours.refs,theirs.refs,x=>x);
+  o.sketches=merge3List(base&&base.sketches,ours.sketches,theirs.sketches,x=>x);
+  o.gearTags=merge3List(base&&base.gearTags,ours.gearTags,theirs.gearTags,x=>x);
+  o.aiGear=merge3List(base&&base.aiGear,ours.aiGear,theirs.aiGear,x=>x.text);
+  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText"])
+    o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
+  o._mt=Math.max(om,tm);
+  return o;
+}
+function mergeLoc(base,ours,theirs){
+  const om=mtOf(ours),tm=mtOf(theirs),b=base||{},o={...ours};
+  o.images=merge3List(base&&base.images,ours.images,theirs.images,x=>x); // per-photo add/delete: concurrent adds both kept, deletes honored, no r2-vs-embedded dupes
+  o.plans=merge3List(base&&base.plans,ours.plans,theirs.plans,x=>x);
+  for(const f of ["name","address","lat","lng","notes","imgId","status"])o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
+  o._mt=Math.max(om,tm);
+  return o;
+}
+function mergeProjects(base,ours,theirs){
+  base=base||{};ours=ours||{};theirs=theirs||{};
+  const out={...ours};
+  out.scenes=merge3List(base.scenes,ours.scenes,theirs.scenes,s=>numKey(s.number),mergeScene);
+  out.locations=merge3List(base.locations,ours.locations,theirs.locations,l=>l.id,mergeLoc);
+  const depts=new Set([...Object.keys(ours.crew||{}),...Object.keys(theirs.crew||{}),...Object.keys(base.crew||{})]);
+  out.crew={};for(const d of depts)out.crew[d]=merge3List((base.crew||{})[d],(ours.crew||{})[d],(theirs.crew||{})[d],m=>m.id||(m.name||"").trim().toLowerCase(),mergePerson(["name","role","phone","email","pron","dept"]));
+  out.contacts=merge3List(base.contacts,ours.contacts,theirs.contacts,c=>c.id||(c.name||"").trim().toLowerCase(),mergePerson(["name","role","address","lat","lng","phone","email"]));
+  out.gear=merge3List(base.gear,ours.gear,theirs.gear,g=>g.id||((g.name||"").toLowerCase()+"|"+g.dept));
+  out.look=merge3List(base.look,ours.look,theirs.look,x=>x);
+  out.inbox=merge3List(base.inbox,ours.inbox,theirs.inbox,x=>x.id||JSON.stringify(x));
+  out.lookNotes=pickBulk(base.lookNotes,ours.lookNotes,theirs.lookNotes);
+  out.days=pickBulk(base.days,ours.days,theirs.days);
+  out.meta={...theirs.meta,...ours.meta};                    // device-local prefs (theme) stay; title/tz are identical
+  return out;
+}
+function refImgIds(p){
+  const ids=new Set();
+  const add=arr=>{for(const r of arr||[])if(typeof r==="string"&&!isImgUrl(r)&&!isR2Ref(r))ids.add(r);};
+  for(const s of p.scenes||[])add(s.refs);
+  add(p.look);
+  for(const l of p.locations||[]){add(l.images);add(l.plans);if(l.imgId&&!isImgUrl(l.imgId)&&!isR2Ref(l.imgId))ids.add(l.imgId);}
+  return ids;
+}
+function mergeDecks(baseProj,ours,theirs){                   // merge full backups -> a clean SELECTIVE deck (no orphan blobs)
+  const merged=mergeProjects(baseProj,ours.data["pb:project"],theirs.data["pb:project"]);
+  const pool={...theirs.data,...ours.data};                  // union of every blob key (ours wins per key)
+  const data={"pb:project":merged};
+  const imgIds=refImgIds(merged),skIds=new Set();
+  for(const s of merged.scenes||[])for(const id of s.sketches||[])skIds.add(id);
+  for(const id of skIds){const sk=pool["pb:sketch:"+id];if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId)&&!isR2Ref(sk.bgImgId))imgIds.add(sk.bgImgId);}}
+  for(const id of imgIds){if(pool["pb:img:"+id]!==undefined)data["pb:img:"+id]=pool["pb:img:"+id];if(pool["pb:imgfull:"+id]!==undefined)data["pb:imgfull:"+id]=pool["pb:imgfull:"+id];}
+  for(const k of Object.keys(pool))if(k.startsWith("pb:scriptink:"))data[k]=pool[k];
+  for(const slot of ["script","schedule"]){if(pool["pb:doc:"+slot]!==undefined){data["pb:doc:"+slot]=pool["pb:doc:"+slot];if(pool["pb:doc:"+slot+"name"]!==undefined)data["pb:doc:"+slot+"name"]=pool["pb:doc:"+slot+"name"];}}
+  return {dpdeckBackup:1,ts:Math.max(ours.ts||0,theirs.ts||0)+1,data};
+}
+let pushLock=Promise.resolve();                              // serialize ALL pushes (debounce / focus / hide / bootstrap) — no overlapping cloud writes
+function pushDeckToCloud(){const run=pushLock.then(()=>_pushDeckToCloud(0),()=>_pushDeckToCloud(0));pushLock=run.catch(()=>{});return run;}
+async function _pushDeckToCloud(depth,carryBase,carryOurs){
+  if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");
+  depth=depth||0;
+  const base=(carryOurs!==undefined)?carryBase:((await store.get("pb:base_snapshot"))||null);  // TRUE common ancestor, held CONSTANT across CAS retries
+  const ours=(carryOurs!==undefined)?carryOurs:await exportFullBackup();                         // our local edits, captured ONCE (never re-diffed against a prior merge)
+  const meta=await remoteDeckMeta();
+  const localSynced=(await store.get("pb:synced_ts"))||0,remoteTs=(meta&&meta.ts)||0;
+  let merged=false,pushDeck=ours;
+  if(remoteTs>localSynced){                                  // cloud is ahead -> MUST merge; a throw here must NOT fall through to an overwrite
+    const t=await r2ReadRaw(DECK_KEY);                        // (throws on a transient read error -> propagates; never plain-overwrites unseen edits)
+    if(t){
+      const theirs=JSON.parse(t);
+      const m=mergeDecks(base,ours,theirs);
+      merged=true;
+      if(jeq(m.data["pb:project"],theirs.data["pb:project"])){ // we contributed nothing -> adopt remote, no push (prevents sync ping-pong)
+        await importFullBackup(m);
+        await store.set("pb:synced_ts",theirs.ts||remoteTs);await store.set("pb:project_mtime",theirs.ts||remoteTs);
+        return {len:0,merged,pushed:false};
+      }
+      pushDeck=m;                                             // do NOT adopt locally yet — only after the write commits (so base_snapshot can't poison a CAS retry)
+    }
+  }
+  pushDeck.ts=Math.max(pushDeck.ts||Date.now(),localSynced+1,remoteTs+1);   // monotonic ts — immune to device clock skew
+  const s=JSON.stringify(pushDeck);
+  if(depth<3){const meta2=await remoteDeckMeta();if(meta2&&meta2.ts&&meta2.ts>Math.max(localSynced,remoteTs))return _pushDeckToCloud(depth+1,base,ours);}  // cloud advanced -> re-merge against the SAME ancestor + our ORIGINAL edits
+  await r2Write(DECK_KEY,s);                                  // both writes awaited; a failure leaves us dirty -> retried next cycle
+  await r2Write(DECK_META,JSON.stringify({ts:pushDeck.ts}));  // advance synced ONLY after BOTH deck + meta land
+  if(merged)await importFullBackup(pushDeck);                 // adopt the merged deck locally now that it's committed
+  await store.set("pb:synced_ts",pushDeck.ts);               // NOT pb:project_mtime: an edit made DURING this push keeps mtime>synced so it's pushed next cycle (not silently equalized)
+  await store.set("pb:base_snapshot",pushDeck.data["pb:project"]);  // ancestor = EXACTLY what we pushed to the cloud (never a re-read of live pb:project, which a during-push edit can have advanced)
+  try{await writeDailySnapshot(s,pushDeck.ts);}catch{}
+  return {len:s.length,merged,pushed:true};
+}
+async function pullDeckFromCloud(){
+  if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");
+  const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");
+  const o=JSON.parse(t);await importFullBackup(o);
+  await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());
+  await store.set("pb:base_snapshot",await store.get("pb:project"));
+  return o.ts||0;
+}
 async function r2Delete(key){try{const res=await fetch(R2_BASE+"/delete/"+encodeURIComponent(key).replace(/%2F/g,"/"),{method:"DELETE",headers:r2Headers()});return res.ok;}catch{return false;}}
 /* VERSION HISTORY — durable dated snapshots in R2 so a bad overwrite or accidental erase is
    recoverable to a point in time. One snapshot per calendar day (first push of the day), plus
@@ -1781,9 +1933,9 @@ function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFo
   const detail=detailId?(project.locations.find(x=>x.id===detailId)||null):null;
   // Deep-link from a scene's location chip: open the rich detail view, not the edit form.
   useEffect(()=>{if(!focusLoc)return;if(project.locations.some(x=>x.id===focusLoc))setDetail(focusLoc);onFocused&&onFocused();},[focusLoc]);
-  const save=l=>setProject(p=>({...p,locations:l.id?p.locations.map(x=>x.id===l.id?l:x):[...p.locations,{...l,id:uid(),images:l.images||[],plans:l.plans||[]}]}));
+  const save=l=>{const m={...l,_mt:Date.now()};setProject(p=>({...p,locations:m.id?p.locations.map(x=>x.id===m.id?m:x):[...p.locations,{...m,id:uid(),images:m.images||[],plans:m.plans||[]}]}));};
   const del=id=>setProject(p=>({...p,locations:p.locations.filter(x=>x.id!==id),scenes:p.scenes.map(s=>s.locationId===id?{...s,locationId:""}:s)}));
-  const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||""};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
+  const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||"",_mt:Date.now()};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
   return <div onDragOver={e=>{if([...(e.dataTransfer?.types||[])].includes("Files")){e.preventDefault();}}} onDrop={e=>{if([...(e.dataTransfer?.types||[])].includes("Files"))e.preventDefault();}}>
     <div style={{display:"flex",justifyContent:"flex-end",marginBottom:13}}><Btn kind="primary" size={12} onClick={()=>setEd({})}><Plus size={16}/>Location</Btn></div>
     {project.locations.length===0?<Empty icon={MapPin} title="No locations yet" body="Add the places you're shooting. Each gets sun direction, weather, travel time from base, a photo gallery, floor plans, and the scenes shot there." action={<Btn kind="primary" onClick={()=>setEd({})}><Plus size={16}/>Add location</Btn>}/>:
@@ -2258,7 +2410,7 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
         <Btn kind="ghost" size={12} onClick={async()=>{await setR2Key(r2key.trim());onToast(r2key.trim()?"Cloud key saved on this device":"Cloud key cleared");}}>Save</Btn>
       </div>
       <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
-        <Btn kind="ghost" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("push");try{const n=await pushDeckToCloud();onToast(`Pushed deck to cloud (${(n/1048576).toFixed(1)} MB)`);}catch(e){onToast("Push failed: "+(e.message||""));}setSyncing("");}}><Upload size={15}/>{syncing==="push"?"Pushing…":"Push deck to cloud"}</Btn>
+        <Btn kind="ghost" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("push");try{const n=await pushDeckToCloud();onToast(`Pushed deck to cloud (${(n.len/1048576).toFixed(1)} MB)${n.merged?" · merged in cloud edits, reloading…":""}`);if(n.merged)setTimeout(()=>location.reload(),900);}catch(e){onToast("Push failed: "+(e.message||""));}setSyncing("");}}><Upload size={15}/>{syncing==="push"?"Pushing…":"Push deck to cloud"}</Btn>
         <Btn kind="ghost" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("pull");try{await pullDeckFromCloud();onToast("Pulled deck from cloud. Reloading…");setTimeout(()=>location.reload(),800);}catch(e){onToast("Pull failed: "+(e.message||""));setSyncing("");}}}><CloudDownload size={15}/>{syncing==="pull"?"Pulling…":"Pull deck from cloud"}</Btn>
       </div>
     </Card>
@@ -2500,7 +2652,7 @@ function normalizeProject(p){
   p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};
   p.scenes=(p.scenes||[]).map(s=>{const m={...emptyScene(s.number),...s};for(const k of ["refs","shots","gearTags","sketches","aiGear"])if(!Array.isArray(m[k]))m[k]=[];return m;});
   p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));
-  p.crew={camera:[],grip:[],electric:[],...(p.crew||{})};
+  p.crew={camera:[],grip:[],electric:[],sfx:[],...(p.crew||{})};
   p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];p.lookNotes=p.lookNotes||"";
   return p;
 }
@@ -2540,7 +2692,32 @@ export default function App(){
   const [sync,setSync]=useState({state:"off",at:0}); // off|idle|pending|syncing|synced|error
   const wide=useWide();
   const loaded=useRef(false);
-  const pulling=useRef(false),skipPush=useRef(false),pushTimer=useRef(null),dirty=useRef(false),nudged=useRef(false);
+  const pulling=useRef(false),skipPush=useRef(false),pushTimer=useRef(null),dirty=useRef(false),nudged=useRef(false),needReload=useRef(false),syncBusy=useRef(false),needReloadBase=useRef(undefined);
+  const projectRef=useRef(null);projectRef.current=project;   // latest in-memory project, for flush + during-sync fold
+  const persistTimer=useRef(null);
+  // Adopt the store's project into React state after a merge/pull. If the user edited DURING the sync
+  // round-trip, 3-way fold that edit (live vs the pre-sync snapshot) into the merged store so no keystroke is lost.
+  const reloadFromStore=useCallback(async(syncStartProject)=>{
+    clearTimeout(persistTimer.current);                       // cancel any pending stale persist before adopting
+    let proj=await store.get("pb:project");
+    const live=projectRef.current;
+    if(syncStartProject!==undefined&&live&&live!==syncStartProject){
+      proj=mergeProjects(syncStartProject,live,proj);         // fold the during-sync edit back in (ancestor = pre-sync)
+      await store.set("pb:project",proj);await store.set("pb:project_mtime",Date.now());dirty.current=true;
+      setProject(normalizeProject(proj));setTb(b=>b+1);       // no skipPush -> the debounce republishes the folded edit
+    }else{
+      skipPush.current=true;setProject(normalizeProject(proj));setTb(b=>b+1);
+    }
+  },[]);
+  // Merge-aware push: flush the latest in-memory edits to the store FIRST (so a merge can't miss them), then
+  // push. pushDeckToCloud may merge cloud changes in; if it did, re-sync the UI from the merged store.
+  const syncPush=useCallback(async()=>{
+    const startProj=projectRef.current;
+    if(startProj){try{await store.set("pb:project",startProj);}catch{}}
+    const r=await pushDeckToCloud();
+    if(r&&r.merged){if(typeof document!=="undefined"&&document.visibilityState==="hidden"){needReload.current=true;needReloadBase.current=startProj;}else await reloadFromStore(startProj);}
+    return r;
+  },[reloadFromStore]);
 
   useEffect(()=>{(async()=>{
     try{if(navigator.storage&&navigator.storage.persist)await navigator.storage.persist();}catch{}
@@ -2561,7 +2738,7 @@ export default function App(){
     restoreScriptPDF().then(()=>setTb(b=>b+1));
     setTimeout(()=>{loaded.current=true;
       // Push stranded local edits from a previous session right away so they reach the cloud.
-      if(hasLocalEdits&&R2_KEY&&!pulling.current){dirty.current=true;pushDeckToCloud().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
+      if(hasLocalEdits&&R2_KEY&&!pulling.current){dirty.current=true;syncPush().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
     },60);
   })();},[]);
 
@@ -2573,50 +2750,61 @@ export default function App(){
     dirty.current=true;
     setSync({state:"pending",at:Date.now()});
     clearTimeout(pushTimer.current);
-    pushTimer.current=setTimeout(async()=>{
-      setSync({state:"syncing",at:Date.now()});
-      try{await pushDeckToCloud();dirty.current=false;setSync({state:"synced",at:Date.now()});}catch{setSync({state:"error",at:Date.now()});}
-    },5000);
+    const fire=async()=>{
+      if(syncBusy.current||pulling.current){pushTimer.current=setTimeout(fire,1500);return;}  // a sync is in flight -> retry soon; NEVER drop the edit (syncPush flushes the latest project)
+      syncBusy.current=true;setSync({state:"syncing",at:Date.now()});
+      try{await syncPush();dirty.current=false;setSync({state:"synced",at:Date.now()});}catch{setSync({state:"error",at:Date.now()});}
+      finally{syncBusy.current=false;}
+    };
+    pushTimer.current=setTimeout(fire,5000);
     return()=>clearTimeout(pushTimer.current);
   },[project]);
 
-  // Pull newer cloud edits when the tab regains focus; flush a pending push when it's hidden.
+  // Fully automatic BOTH-WAY sync — hands-off. A background poll (every 12s while visible) + focus +
+  // visibility cover every case with no manual action: another device's edits pull in on their own;
+  // when both devices edited, it MERGES (pull+merge+push) so nothing is ever lost; ours push on the
+  // 5s debounce. A reconcile is in flight at most once at a time (busy guard).
   useEffect(()=>{
-    const checkPull=async()=>{
-      if(!R2_KEY||pulling.current)return;
+    let pollTimer=null;
+    const reconcile=async(opts={})=>{
+      if(needReload.current){needReload.current=false;const nb=needReloadBase.current;needReloadBase.current=undefined;await reloadFromStore(nb);}  // adopt a merge that landed while hidden, folding in any edit made during that window
+      if(!R2_KEY||pulling.current||syncBusy.current)return;
+      syncBusy.current=true;
       try{
-        const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
-        // Unsynced local edits (e.g. an unload flush the browser dropped on mobile) — push them now.
-        // Focus is a foreground event, so this reliably recovers what the best-effort pagehide flush can miss.
-        if(localMtime>localSynced||dirty.current){
-          clearTimeout(pushTimer.current);setSync({state:"syncing",at:Date.now()});
-          try{await pushDeckToCloud();dirty.current=false;setSync({state:"synced",at:Date.now()});}catch{setSync({state:"error",at:Date.now()});}
-          return;
-        }
         const meta=await remoteDeckMeta();
-        if(meta&&meta.ts&&meta.ts>localSynced&&!dirty.current){
-          pulling.current=true;setSync({state:"syncing",at:Date.now()});
-          await pullDeckFromCloud();
-          skipPush.current=true;setProject(normalizeProject(await store.get("pb:project")));setTb(b=>b+1);
-          pulling.current=false;setSync({state:"synced",at:Date.now()});
+        const localSynced=(await store.get("pb:synced_ts"))||0,localMtime=(await store.get("pb:project_mtime"))||0;
+        const hasLocal=localMtime>localSynced||dirty.current;
+        const remoteNewer=!!(meta&&meta.ts&&meta.ts>localSynced);
+        // One path for everything: syncPush pulls+merges, adopts-without-push when we only pull (no ping-pong),
+        // and folds any edit made DURING the round-trip (reloadFromStore vs the pre-sync snapshot). A passive
+        // poll with only-local edits is left to the debounce; focus/flush (pushLocal) recovers stranded local edits.
+        if(remoteNewer||(hasLocal&&opts.pushLocal)){
+          clearTimeout(pushTimer.current);setSync({state:"syncing",at:Date.now()});
+          try{await syncPush();dirty.current=false;setSync({state:"synced",at:Date.now()});}catch{setSync({state:"error",at:Date.now()});}
         }
-      }catch{pulling.current=false;}
+      }catch{}
+      finally{syncBusy.current=false;}
     };
+    const tick=()=>{if(typeof document==="undefined"||document.visibilityState==="visible")reconcile();};
+    const startPoll=()=>{if(pollTimer)return;pollTimer=setInterval(tick,12000);};
+    const stopPoll=()=>{if(pollTimer){clearInterval(pollTimer);pollTimer=null;}};
+    const onFocus=()=>reconcile({pushLocal:true});
     const onVis=()=>{
-      if(document.visibilityState==="visible")checkPull();
-      else if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);pushDeckToCloud().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
+      if(document.visibilityState==="visible"){reconcile({pushLocal:true});startPoll();}
+      else{stopPoll();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}}
     };
-    const onHide=()=>{if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);pushDeckToCloud().catch(()=>{});}};
-    window.addEventListener("focus",checkPull);document.addEventListener("visibilitychange",onVis);window.addEventListener("pagehide",onHide);
-    return()=>{window.removeEventListener("focus",checkPull);document.removeEventListener("visibilitychange",onVis);window.removeEventListener("pagehide",onHide);};
+    const onHide=()=>{stopPoll();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}};
+    window.addEventListener("focus",onFocus);document.addEventListener("visibilitychange",onVis);window.addEventListener("pagehide",onHide);
+    if(typeof document==="undefined"||document.visibilityState==="visible")startPoll();
+    return()=>{window.removeEventListener("focus",onFocus);document.removeEventListener("visibilitychange",onVis);window.removeEventListener("pagehide",onHide);stopPoll();};
   },[]);
 
-  useEffect(()=>{if(!loaded.current||!project)return;const t=setTimeout(()=>{store.set("pb:project",project);},600);return()=>clearTimeout(t);},[project]);
+  useEffect(()=>{if(!loaded.current||!project||needReload.current)return;clearTimeout(persistTimer.current);persistTimer.current=setTimeout(()=>{store.set("pb:project",project);},600);return()=>clearTimeout(persistTimer.current);},[project]);
 
   useEffect(()=>{const h=e=>{const tag=((e.target&&e.target.tagName)||"").toLowerCase();const typing=tag==="input"||tag==="textarea"||(e.target&&e.target.isContentEditable);if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setJump(j=>!j);}else if(e.key==="/"&&!typing){e.preventDefault();setJump(true);}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
 
   const toastFn=useCallback((msg,action)=>setToast({msg,action,id:uid()}),[]);
-  const patchScene=useCallback((number,patch)=>setProject(p=>({...p,scenes:p.scenes.map(s=>s.number===number?{...s,...patch}:s)})),[]);
+  const patchScene=useCallback((number,patch)=>setProject(p=>({...p,scenes:p.scenes.map(s=>s.number===number?{...s,...patch,_mt:Date.now()}:s)})),[]);
   const tagGear=useCallback((number,name,dept)=>setProject(p=>{let g=p.gear.find(x=>x.name.toLowerCase()===name.toLowerCase()&&x.dept===dept),gear=p.gear;if(!g){g={id:uid(),name,dept};gear=[...p.gear,g];}return {...p,gear,scenes:p.scenes.map(s=>s.number===number?(s.gearTags.includes(g.id)?s:{...s,gearTags:[...s.gearTags,g.id]}):s)};}),[]);
   const openLightbox=useCallback((items,i=0)=>setLight({items:(Array.isArray(items)?items:[items]).filter(Boolean),i}),[]);
   const sendRefBetween=useCallback((fromN,imgId,toN,mode)=>setProject(p=>({...p,scenes:p.scenes.map(s=>{
