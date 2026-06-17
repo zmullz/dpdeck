@@ -1240,14 +1240,17 @@ function SunCompass({lat,lng,tz,date,hm}){
 // sun-azimuth arc on the rim, the current sun ray (where light comes FROM) + glyph, and the shadow
 // direction. Lets you read where light hits a real window/wall against the actual geography.
 function SunMap({lat,lng,tz,date,hm,size=200}){
-  const [err,setErr]=useState(false);
-  useEffect(()=>{setErr(false);},[lat,lng]);
   const sun=useMemo(()=>{try{const t=sunTimes(dayNoonUTC(date),+lat,+lng);const azOf=d=>d&&!isNaN(d)?azC(sunPos(d,+lat,+lng).az).deg:null;return {sr:azOf(t.sunrise),ss:azOf(t.sunset)};}catch{return null;}},[lat,lng,date]);
   const cur=useMemo(()=>{try{const p=sunPos(localToAbs(date,Math.floor(hm/60),hm%60,tz),+lat,+lng);return {az:azC(p.az).deg,alt:p.alt*180/PI};}catch{return null;}},[lat,lng,tz,date,hm]);
   if(lat==null||lat===""||lng==null||lng==="")return null;
-  const la=+lat,ln=+lng,D=110,dLat=D/111320,dLng=D/(111320*Math.cos(la*rad));
-  const bbox=`${(ln-dLng).toFixed(6)},${(la-dLat).toFixed(6)},${(ln+dLng).toFixed(6)},${(la+dLat).toFixed(6)}`;
-  const url=`https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export?bbox=${bbox}&bboxSR=4326&imageSR=3857&size=512,512&format=png24&f=image`;
+  const la=+lat,ln=+lng;
+  // Native Esri World Imagery XYZ tiles (sharp, keyless), stitched + centered on the exact coordinate.
+  // Pick the zoom whose native ground resolution best fits a ~180m-wide view in this widget.
+  let z=Math.round(Math.log2(156543.03392*Math.cos(la*rad)/(180/size)));z=clamp(z,2,19);
+  const n=2**z,xf=n*(ln+180)/360,yf=n*(1-Math.log(Math.tan(la*rad)+1/Math.cos(la*rad))/PI)/2;
+  const xt=Math.floor(xf),yt=Math.floor(yf),k=Math.ceil((size/2)/256)+1;
+  const tiles=[];for(let dy=-k;dy<=k;dy++)for(let dx=-k;dx<=k;dx++){const tx=xt+dx,ty=yt+dy;if(tx<0||ty<0||tx>=n||ty>=n)continue;tiles.push({tx,ty,sx:(tx-xf)*256+size/2,sy:(ty-yf)*256+size/2});}
+  const tileUrl=t=>`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${t.ty}/${t.tx}`;
   const S=size,cc=S/2,R=S/2-3;
   const pt=(deg,r)=>[cc+r*Math.sin(deg*rad),cc-r*Math.cos(deg*rad)];
   const cardOf=deg=>CARD[Math.round((((deg%360)+360)%360)/22.5)%16];
@@ -1258,17 +1261,24 @@ function SunMap({lat,lng,tz,date,hm,size=200}){
   const compass=(deg,t)=>{const [x,y]=pt(deg,R-12);return <text x={x.toFixed(1)} y={(y+3).toFixed(1)} textAnchor="middle" style={{fontFamily:MONO,fontSize:9,fontWeight:700,fill:"#fff"}} opacity={0.92}>{t}</text>;};
   return <div style={{width:size,flexShrink:0}}>
     <div style={{position:"relative",width:size,height:size,borderRadius:12,overflow:"hidden",border:`1px solid ${c.line2}`,background:c.bg2}}>
-      {!err?<img src={url} onError={()=>setErr(true)} width={size} height={size} style={{display:"block",width:size,height:size,objectFit:"cover"}} alt="satellite"/>:<div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",fontFamily:UI,fontSize:11,color:c.t2,textAlign:"center",padding:10}}>Satellite view offline (sun overlay still accurate)</div>}
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{position:"absolute",inset:0}}>
+        {tiles.map(t=><image key={t.tx+"_"+t.ty} href={tileUrl(t)} x={t.sx.toFixed(2)} y={t.sy.toFixed(2)} width="256.5" height="256.5" preserveAspectRatio="none"/>)}
+      </svg>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{position:"absolute",inset:0,pointerEvents:"none"}}>
         <circle cx={cc} cy={cc} r={R} fill="none" stroke="#0007" strokeWidth={1}/>
         {arcPath&&<path d={arcPath} fill="none" stroke="#ffd27a" strokeWidth={4} strokeLinecap="round" opacity={0.85}/>}
         {sun&&sun.sr!=null&&(()=>{const [x,y]=pt(sun.sr,R-3);return <circle cx={x} cy={y} r={3.2} fill="#ffb24d" stroke="#000" strokeWidth={0.6}/>;})()}
         {sun&&sun.ss!=null&&(()=>{const [x,y]=pt(sun.ss,R-3);return <circle cx={x} cy={y} r={3.2} fill={c.night} stroke="#000" strokeWidth={0.6}/>;})()}
-        {sh&&<line x1={cc} y1={cc} x2={sh[0].toFixed(1)} y2={sh[1].toFixed(1)} stroke="#000" strokeWidth={2.5} strokeDasharray="3 3" opacity={0.55}/>}
+        {sh&&<line x1={cc} y1={cc} x2={sh[0].toFixed(1)} y2={sh[1].toFixed(1)} stroke="#000" strokeWidth={2.5} strokeDasharray="3 3" opacity={0.6}/>}
         {sp&&<><line x1={cc} y1={cc} x2={sp[0].toFixed(1)} y2={sp[1].toFixed(1)} stroke="#ffd27a" strokeWidth={2}/><circle cx={sp[0].toFixed(1)} cy={sp[1].toFixed(1)} r={7} fill="#ffd27a" stroke="#a76a16" strokeWidth={1}/></>}
-        {cur&&cur.alt<=0&&<text x={cc} y={cc-5} textAnchor="middle" style={{fontFamily:UI,fontSize:10,fontWeight:700,fill:"#fff"}} opacity={0.85}>sun down</text>}
-        <circle cx={cc} cy={cc} r={4} fill="#fff" stroke="#000" strokeWidth={1.5}/>
+        {cur&&cur.alt<=0&&<text x={cc} y={cc-30} textAnchor="middle" style={{fontFamily:UI,fontSize:10,fontWeight:700,fill:"#fff"}} opacity={0.85}>sun down</text>}
         {compass(0,"N")}{compass(90,"E")}{compass(180,"S")}{compass(270,"W")}
+        {/* pin: tip sits exactly on the location (viewport center) */}
+        <g transform={`translate(${cc},${cc})`}>
+          <ellipse cx="0" cy="1.5" rx="4" ry="1.6" fill="#000" opacity="0.35"/>
+          <path d="M0,0 C-6.5,-13 -9,-19 0,-26 C9,-19 6.5,-13 0,0Z" fill="#ff4d4d" stroke="#fff" strokeWidth="1.3"/>
+          <circle cx="0" cy="-18" r="3.1" fill="#fff"/>
+        </g>
       </svg>
     </div>
     {cur&&<div style={{fontFamily:UI,fontSize:11,color:c.t1,marginTop:5,lineHeight:1.5}}>{cur.alt>0?<>Light from <b style={{color:c.accent}}>{cardOf(cur.az)}</b> ({Math.round(cur.az)}°), {Math.round(cur.alt)}° up{cur.alt>1?<> · shadows {cardOf((cur.az+180)%360)}</>:null}</>:"Sun below horizon"}</div>}
@@ -2813,7 +2823,7 @@ function Import({project,setProject,onToast}){
 }
 
 /* SETTINGS */
-function SettingsView({project,setProject,onToast,onThemeChange}){
+function SettingsView({project,setProject,onToast,onThemeChange,onNav}){
   const m=project.meta;const set=(k,v)=>setProject(p=>({...p,meta:{...p.meta,[k]:v}}));
   const [wipe,setWipe]=useState(false);
   const [aikey,setAikey]=useState("");
@@ -2827,6 +2837,14 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     <Card title="Film" icon={Film}>
       <Field label="Title"><TextInput value={m.title} onChange={e=>set("title",e.target.value)}/></Field>
+    </Card>
+    <Card title="Documents" icon={FileText}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>The ground-truth script and shooting-schedule PDFs. They travel with the deck and drive the per-scene script pages. Open or replace them here.</div>
+      <Btn kind="ghost" size={12} onClick={()=>onNav&&onNav("docs")}><BookOpen size={15}/>Open Documents</Btn>
+    </Card>
+    <Card title="Import / load a project" icon={Upload}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>Load a project file or paste a parsed deck (script, schedule, shots, gear). On a new device with Cloud sync on, you do not need this; just enter the key.</div>
+      <Btn kind="ghost" size={12} onClick={()=>onNav&&onNav("import")}><Upload size={15}/>Open Import</Btn>
     </Card>
     <Card title="Base (for travel times)" icon={Navigation}>
       <Field label="Base name" style={{marginBottom:11}}><TextInput value={m.baseName||""} onChange={e=>set("baseName",e.target.value)} placeholder="Production office / hotel"/></Field>
@@ -2907,8 +2925,10 @@ const PRINT_CSS=`
   [data-noprint]{display:none !important;}
   html,body{background:#fff !important;}
   #print-doc{box-shadow:none !important;max-width:100% !important;padding:0 !important;margin:0 !important;}
-  .pd-scene,.pd-loc,.pd-row{break-inside:avoid;}
+  .pd-scene,.pd-loc,.pd-row,.pd-gearscene{break-inside:avoid;}
   .pd-section{break-before:page;}
+  .pd-day{break-before:page;}
+  .pd-day:first-child{break-before:auto;}
   img,canvas{break-inside:avoid;}
 }
 @page{margin:14mm;}
@@ -3000,27 +3020,112 @@ function ExportDoc({project}){
   </div>;
 }
 
-/* GEAR PULL — specialty gear by department, with the scenes each is needed on */
-function GearSheet({project,depts}){
+/* GEAR PULL: specialty gear, organized by department (each item with the scenes it is on) or by scene */
+function GearSheet({project,depts,by="dept"}){
   const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00"};
   const sec={fontFamily:SERIF,fontSize:18,fontWeight:700,color:P.text,borderBottom:`2px solid ${P.text}`,paddingBottom:5,margin:"0 0 10px"};
+  const selDepts=DEPTS.filter(d=>depts.includes(d.k));
+  const gearById=id=>project.gear.find(g=>g.id===id);
   const usedBy=id=>project.scenes.filter(s=>s.status!=="omitted"&&(s.gearTags||[]).includes(id)).sort((a,b)=>cmpNum(a.number,b.number)).map(s=>s.number);
+  const head=<div style={{marginBottom:24}}>
+    <div style={{fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700,marginBottom:8}}>Specialty gear pull{by==="scene"?" · by scene":""}</div>
+    <div style={{fontFamily:SERIF,fontSize:32,fontWeight:700,lineHeight:1.1}}>{project.meta.title||"Untitled Film"}</div>
+    <div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:4}}>{selDepts.map(d=>d.label).join(" + ")||"No department selected"} · Generated {new Date().toLocaleDateString(undefined,{year:"numeric",month:"long",day:"numeric"})}</div>
+  </div>;
+  const shell=kids=><div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>{head}{kids}</div>;
+  if(by==="scene"){
+    const scenes=project.scenes.filter(s=>s.status!=="omitted").filter(s=>(s.gearTags||[]).some(id=>{const g=gearById(id);return g&&depts.includes(g.dept);})).sort((a,b)=>{
+      const ad=a.shootDay?0:1,bd=b.shootDay?0:1;if(ad!==bd)return ad-bd;
+      if(a.shootDay&&b.shootDay){const c=cmpNum(a.shootDay,b.shootDay);if(c)return c;const o=(+a.shootOrder||0)-(+b.shootOrder||0);if(o)return o;}
+      return cmpNum(a.number,b.number);
+    });
+    return shell(scenes.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>No gear tagged on any scene in the selected departments.</div>:
+      scenes.map(s=>{const items=(s.gearTags||[]).map(gearById).filter(g=>g&&depts.includes(g.dept));return <div key={s.number} className="pd-gearscene" style={{marginBottom:13,paddingBottom:11,borderBottom:`1px solid ${P.line}`}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:9,flexWrap:"wrap"}}>
+          <span style={{fontFamily:MONO,fontSize:16,fontWeight:700,color:P.accent}}>{s.number}</span>
+          <span style={{fontFamily:UI,fontSize:13,fontWeight:700}}>{s.slug} {s.set}</span>
+          {s.dayNight&&<span style={{fontFamily:MONO,fontSize:10,color:P.muted}}>{s.dayNight}</span>}
+          <span style={{flex:1}}/>
+          {s.shootDay&&<span style={{fontFamily:MONO,fontSize:11,color:P.muted}}>Day {s.shootDay}{s.shootOrder?` · #${s.shootOrder}`:""}</span>}
+        </div>
+        <div style={{marginTop:5}}>{selDepts.map(d=>{const di=items.filter(x=>x.dept===d.k);return di.length?<div key={d.k} style={{fontFamily:UI,fontSize:12.5,lineHeight:1.6}}><b>{d.label}:</b> {di.map(x=>x.name).join(", ")}</div>:null;})}</div>
+      </div>;}));
+  }
+  return shell(selDepts.map(d=>{const items=project.gear.filter(g=>g.dept===d.k);return <div key={d.k} className="pd-section" style={{marginBottom:22}}>
+    <div style={sec}>{d.label}</div>
+    {items.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>None on this department.</div>:
+      <table style={{width:"100%",borderCollapse:"collapse"}}><tbody>
+        {items.map(g=>{const ns=usedBy(g.id);return <tr key={g.id} className="pd-row" style={{borderBottom:`1px solid ${P.line}`}}>
+          <td style={{padding:"7px 8px",fontFamily:UI,fontSize:13.5,fontWeight:600,verticalAlign:"top",width:"38%"}}>{g.name}</td>
+          <td style={{padding:"7px 8px",fontFamily:MONO,fontSize:11,color:P.muted,verticalAlign:"top"}}>{ns.length?`${ns.length} scene${ns.length>1?"s":""}: ${ns.join(", ")}`:"unassigned"}</td>
+        </tr>;})}
+      </tbody></table>}
+  </div>;}));
+}
+
+/* DP SIDES: a per-shoot-day crew packet: the day's schedule + sun + weather, then each scene with
+   script, shots, gear, location and references. One day per page; pick a day or send them all. */
+function PrintWeather({lat,lng,date}){
+  const st=useWeather(lat,lng,date);
+  if(st.s!=="ok")return <span style={{color:"#888"}}>forecast not in range yet</span>;
+  const {label}=wxMeta(st.code);
+  return <span>{label}, {Math.round(st.hi)}°/{Math.round(st.lo)}°F{st.pr>=30?`, ${st.pr}% rain`:""}{st.wind?`, wind ${Math.round(st.wind)} mph`:""}</span>;
+}
+function SidesDoc({project,dayFilter}){
+  const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00",soft:"#f5f2ec"};
+  const m=project.meta||{};
+  const sub={fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700};
+  const sceneByNum=new Map(project.scenes.map(s=>[numKey(s.number),s]));
+  const loc=id=>project.locations.find(l=>l.id===id);
+  const gearOf=s=>(s.gearTags||[]).map(id=>project.gear.find(g=>g.id===id)).filter(Boolean);
+  let allDays;
+  if(project.days&&project.days.length)allDays=project.days.map(d=>({day:String(d.day),date:d.date||"",nums:(d.scenes||[]).map(String)}));
+  else allDays=groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(x=>x.shootDate)||{}).shootDate||"",nums:[...sc].sort((a,b)=>(+a.shootOrder||0)-(+b.shootOrder||0)).map(x=>String(x.number))}));
+  allDays=allDays.filter(d=>d.day).sort((a,b)=>cmpNum(a.day,b.day));
+  const days=(dayFilter&&dayFilter!=="all")?allDays.filter(d=>String(d.day)===String(dayFilter)):allDays;
+  const imgRow=(arr,h)=>arr&&arr.length?<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:6}}>{arr.map((v,i)=><StoredImg key={i} id={v} style={{height:h,maxWidth:"31%",objectFit:"cover",border:`1px solid ${P.line}`,borderRadius:4,background:P.soft}}/>)}</div>:null;
   return <div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>
-    <div style={{marginBottom:24}}>
-      <div style={{fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700,marginBottom:8}}>Specialty gear pull</div>
-      <div style={{fontFamily:SERIF,fontSize:32,fontWeight:700,lineHeight:1.1}}>{project.meta.title||"Untitled Film"}</div>
-      <div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:4}}>{DEPTS.filter(d=>depts.includes(d.k)).map(d=>d.label).join(" + ")||"No department selected"} · Generated {new Date().toLocaleDateString(undefined,{year:"numeric",month:"long",day:"numeric"})}</div>
-    </div>
-    {DEPTS.filter(d=>depts.includes(d.k)).map(d=>{const items=project.gear.filter(g=>g.dept===d.k);return <div key={d.k} className="pd-section" style={{marginBottom:22}}>
-      <div style={sec}>{d.label}</div>
-      {items.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>None on this department.</div>:
-        <table style={{width:"100%",borderCollapse:"collapse"}}><tbody>
-          {items.map(g=>{const ns=usedBy(g.id);return <tr key={g.id} className="pd-row" style={{borderBottom:`1px solid ${P.line}`}}>
-            <td style={{padding:"7px 8px",fontFamily:UI,fontSize:13.5,fontWeight:600,verticalAlign:"top",width:"38%"}}>{g.name}</td>
-            <td style={{padding:"7px 8px",fontFamily:MONO,fontSize:11,color:P.muted,verticalAlign:"top"}}>{ns.length?`${ns.length} scene${ns.length>1?"s":""}: ${ns.join(", ")}`:"unassigned"}</td>
-          </tr>;})}
-        </tbody></table>}
-    </div>;})}
+    {days.length===0&&<div style={{fontFamily:UI,fontSize:13,color:P.muted}}>{allDays.length?"That shoot day has no scenes. Pick another day, or choose All shoot days.":"No shoot days scheduled yet. Add a schedule in Settings, under Import."}</div>}
+    {days.map(day=>{
+      const scenes=day.nums.map(n=>sceneByNum.get(numKey(n))).filter(Boolean).filter(s=>s.status!=="omitted");
+      const dloc=dayLocation(scenes,project.locations);
+      const dt=day.date?new Date(day.date+"T12:00"):null;
+      const gear=Object.fromEntries(DEPTS.map(d=>[d.k,new Set()]));scenes.forEach(s=>gearOf(s).forEach(g=>{if(gear[g.dept])gear[g.dept].add(g.name);}));
+      const eighths=scenes.reduce((a,s)=>a+(+s.eighths||0),0);
+      return <div key={day.day} className="pd-day">
+        <div style={{borderBottom:`2px solid ${P.text}`,paddingBottom:8,marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:12,flexWrap:"wrap"}}>
+            <span style={{fontFamily:SERIF,fontSize:26,fontWeight:700}}>Day {day.day}</span>
+            {dt&&<span style={{fontFamily:UI,fontSize:14,color:P.muted}}>{dt.toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"})}</span>}
+            <span style={{flex:1}}/>
+            <span style={{fontFamily:MONO,fontSize:12,color:P.muted}}>{scenes.length} scene{scenes.length===1?"":"s"}{eighths?` · ${fmtEighths(eighths)} pg`:""}</span>
+          </div>
+          <div style={{fontFamily:UI,fontSize:11.5,color:P.muted,marginTop:5}}>{m.title||"Untitled Film"}{dloc?` · ${dloc.name}`:""}</div>
+          {dloc&&dloc.lat&&day.date&&<div style={{fontFamily:UI,fontSize:11.5,color:P.text,marginTop:5,lineHeight:1.7}}>
+            <div><b>Sun:</b> <ExportSun lat={dloc.lat} lng={dloc.lng} tz={m.tz} date={day.date}/></div>
+            <div><b>Weather:</b> <PrintWeather lat={dloc.lat} lng={dloc.lng} date={day.date}/></div>
+          </div>}
+        </div>
+        {DEPTS.some(d=>gear[d.k].size)&&<div style={{marginBottom:12}}><span style={sub}>Gear this day</span><div style={{marginTop:3}}>{DEPTS.map(d=>gear[d.k].size?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {[...gear[d.k]].join(", ")}</div>:null)}</div></div>}
+        {scenes.map(s=>{const l=loc(s.locationId);const g=gearOf(s);return <div key={s.number} className="pd-scene" style={{marginBottom:16,paddingBottom:13,borderBottom:`1px solid ${P.line}`}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:9,flexWrap:"wrap"}}>
+            {s.shootOrder?<span style={{fontFamily:MONO,fontSize:11,color:P.muted}}>#{s.shootOrder}</span>:null}
+            <span style={{fontFamily:MONO,fontSize:18,fontWeight:700,color:P.accent}}>{s.number}</span>
+            <span style={{fontFamily:UI,fontSize:13.5,fontWeight:700}}>{s.slug} {s.set}</span>
+            {s.dayNight&&<span style={{fontFamily:MONO,fontSize:11,color:P.muted}}>{s.dayNight}</span>}
+            <span style={{flex:1}}/>
+            {s.eighths>0&&<span style={{fontFamily:MONO,fontSize:11,color:P.muted}}>{fmtEighths(s.eighths)} pg</span>}
+          </div>
+          {l&&<div style={{fontFamily:UI,fontSize:11.5,color:P.muted,marginTop:2}}>Location: {l.name}</div>}
+          {s.syn&&<div style={{fontFamily:SERIF,fontSize:13,lineHeight:1.5,marginTop:6}}>{s.syn}</div>}
+          {s.scriptText&&<div style={{marginTop:6}}><span style={sub}>Script</span><div style={{marginTop:3}}><ScreenplayText text={s.scriptText} base={P.text} strong={P.text} dim={P.muted} size={10}/></div></div>}
+          {s.notes&&<div style={{marginTop:6}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
+          {s.shots.length>0&&<div style={{marginTop:6}}><span style={sub}>Shots</span><div style={{marginTop:3}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12,lineHeight:1.5,display:"flex",gap:7}}><span style={{color:P.muted,fontFamily:MONO,fontSize:10,minWidth:16}}>{i+1}.</span><span>{sh.text}</span></div>)}</div></div>}
+          {g.length>0&&<div style={{marginTop:6}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const di=g.filter(x=>x.dept===d.k);return di.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {di.map(x=>x.name).join(", ")}</div>:null;})}</div></div>}
+          {imgRow(s.refs,110)}
+        </div>;})}
+      </div>;
+    })}
   </div>;
 }
 
@@ -3118,15 +3223,12 @@ const NAV=[
   {k:"days",label:"Schedule",icon:Calendar},
   {k:"scenes",label:"Scenes",icon:Film},
   {k:"look",label:"Look",icon:ImageIcon},
-  {k:"docs",label:"Docs",icon:BookOpen},
-  {k:"capture",label:"Capture",icon:Inbox},
   {k:"locations",label:"Locations",icon:MapPin},
   {k:"crew",label:"Crew",icon:Users},
   {k:"gear",label:"Gear",icon:Wrench},
   {k:"export",label:"Export PDF",icon:Printer},
-  {k:"import",label:"Import",icon:Upload},
   {k:"settings",label:"Settings",icon:Settings},
-];
+];  // Docs + Import live inside Settings; Capture is replaced by the in-app viewfinder.
 const MOBILE_NAV=["home","scenes","days","locations"];
 
 export default function App(){
@@ -3142,7 +3244,7 @@ export default function App(){
   const [info,setInfo]=useState(null);
   const [more,setMore]=useState(false);
   const [jump,setJump]=useState(false);
-  const [exp,setExp]=useState({mode:"full",depts:DEPTS.map(d=>d.k)});
+  const [exp,setExp]=useState({mode:"full",depts:DEPTS.map(d=>d.k),gearBy:"dept",day:"all"});
   const [pdfv,setPdfv]=useState(null);
   const [focusLoc,setFocusLoc]=useState(null);
   const [hasKey,setHasKey]=useState(false);
@@ -3387,22 +3489,32 @@ export default function App(){
         {view==="look"&&<LookBoard project={project} setProject={setProject} openLightbox={openLightbox} onToast={toastFn}/>}
         {view==="docs"&&<Documents openPdf={openPdf} onToast={toastFn}/>}
         {view==="days"&&<Days project={project} onOpen={openScene}/>}
-        {view==="capture"&&<Capture project={project} setProject={setProject} onFiled={()=>{}} onToast={toastFn}/>}
         {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn} focusLoc={focusLoc} onFocused={()=>setFocusLoc(null)} openVf={setVf}/>}
         {view==="crew"&&<Crew project={project} setProject={setProject}/>}
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
         {view==="contacts"&&<Crew project={project} setProject={setProject}/>}
-        {view==="export"&&<div>
+        {view==="export"&&(()=>{
+          const dayList=((project.days&&project.days.length)?project.days.map(d=>({day:String(d.day),date:d.date||""})):groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(x=>x.shootDate)||{}).shootDate||""}))).filter(d=>d.day).sort((a,b)=>cmpNum(a.day,b.day));
+          const desc=exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then print.":exp.mode==="gear"?(exp.gearBy==="scene"?"Gear pull organized by scene: every scene with the specialty gear it needs, in shooting order. Toggle departments to include.":"Gear pull by department: each item with the scenes it is needed on. Toggle departments to include."):"DP Sides: a per-shoot-day packet to send the crew. Each day has its schedule, every scene with script, shots, gear, location, sun and weather. Pick one day or send them all. Scroll through once so images load, then print.";
+          return <div>
           <div data-noprint style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
-            <div style={{width:270}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"}]}/></div>
-            {exp.mode==="gear"&&<div style={{display:"flex",gap:6}}>{DEPTS.map(d=>{const on=exp.depts.includes(d.k);return <button key={d.k} onClick={()=>setExp(e=>({...e,depts:on?e.depts.filter(x=>x!==d.k):[...e.depts,d.k]}))} style={{padding:"8px 12px",borderRadius:8,border:`1px solid ${on?c.accent:c.line2}`,background:on?c.accentSoft:c.bg2,color:on?c.accent:c.t1,fontFamily:UI,fontSize:13,fontWeight:650,cursor:"pointer"}}>{d.label}</button>;})}</div>}
+            <div style={{width:340}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"},{k:"sides",label:"DP Sides"}]}/></div>
+            {exp.mode==="gear"&&<>
+              <div style={{width:230}}><Segmented value={exp.gearBy} onChange={v=>setExp(e=>({...e,gearBy:v||"dept"}))} options={[{k:"dept",label:"By department"},{k:"scene",label:"By scene"}]}/></div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{DEPTS.map(d=>{const on=exp.depts.includes(d.k);return <button key={d.k} onClick={()=>setExp(e=>({...e,depts:on?e.depts.filter(x=>x!==d.k):[...e.depts,d.k]}))} style={{padding:"8px 12px",borderRadius:8,border:`1px solid ${on?c.accent:c.line2}`,background:on?c.accentSoft:c.bg2,color:on?c.accent:c.t1,fontFamily:UI,fontSize:13,fontWeight:650,cursor:"pointer"}}>{d.label}</button>;})}</div>
+            </>}
+            {exp.mode==="sides"&&<select value={exp.day} onChange={e=>setExp(x=>({...x,day:e.target.value}))} style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${c.line2}`,background:c.bg2,color:c.t0,fontFamily:UI,fontSize:13,fontWeight:600}}>
+              <option value="all">All shoot days</option>
+              {dayList.map(d=><option key={d.day} value={d.day}>Day {d.day}{d.date?` · ${new Date(d.date+"T12:00").toLocaleDateString(undefined,{month:"short",day:"numeric"})}`:""}</option>)}
+            </select>}
             <Btn kind="primary" size={13} onClick={()=>window.print()}><Printer size={16}/>Print / Save as PDF</Btn>
           </div>
-          <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:620,marginBottom:14}}>{exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then Print and Save as PDF.":`Gear pull: specialty gear by department, each with the scenes it is needed on. Toggle ${DEPTS.map(d=>d.label).join(" / ")} above.`}</div>
-          {exp.mode==="full"?<ExportDoc project={project}/>:<GearSheet project={project} depts={exp.depts}/>}
-        </div>}
+          <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:640,marginBottom:14}}>{desc}</div>
+          {exp.mode==="full"?<ExportDoc project={project}/>:exp.mode==="gear"?<GearSheet project={project} depts={exp.depts} by={exp.gearBy}/>:<SidesDoc project={project} dayFilter={exp.day}/>}
+          </div>;
+        })()}
         {view==="import"&&<Import project={project} setProject={setProject} onToast={toastFn}/>}
-        {view==="settings"&&<SettingsView project={project} setProject={setProject} onToast={toastFn} onThemeChange={themeChange}/>}
+        {view==="settings"&&<SettingsView project={project} setProject={setProject} onToast={toastFn} onThemeChange={themeChange} onNav={setView}/>}
       </div>
     </div>
 
@@ -3425,4 +3537,4 @@ export default function App(){
     <Toast toast={toast} onClose={()=>setToast(null)}/>
   </div>;
 }
-const TITLES={home:"Home",days:"Schedule",scenes:"Scenes",look:"Look",docs:"Documents",capture:"Capture",locations:"Locations",crew:"Crew",gear:"Gear",contacts:"Crew",export:"Export PDF",import:"Import",settings:"Settings",scene:""};
+const TITLES={home:"Home",days:"Schedule",scenes:"Scenes",look:"Look",docs:"Documents",locations:"Locations",crew:"Crew",gear:"Gear",contacts:"Crew",export:"Export PDF",import:"Import",settings:"Settings",scene:""};
