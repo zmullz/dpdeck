@@ -3047,38 +3047,34 @@ export default function App(){
         <IconBtn icon={ArrowLeft} onClick={goBack} dim title="Back to last screen" style={{opacity:canBack?1:0.3,width:wide?40:34}}/>
         <IconBtn icon={ArrowRight} onClick={goFwd} dim title="Forward" style={{opacity:canFwd?1:0.3,width:wide?40:34}}/>
       </div>
-      {wide&&view==="scene"&&curScene?(
-        <>
-          {/* merged scene bar: identity + status + nav, freeing the column space the old InfoStrip took */}
+      {/* CENTER: page identity (scene chips when on a scene, otherwise the page title). It flex-grows and
+          truncates, so it NEVER pushes the control cluster — the controls stay put on every page. */}
+      <div style={{flex:"1 1 auto",minWidth:0,display:"flex",alignItems:"center",gap:8,overflow:"hidden"}}>
+        {wide&&view==="scene"&&curScene?<>
           <span style={{fontFamily:MONO,fontSize:20,fontWeight:700,color:c.accent,letterSpacing:"-0.5px",flexShrink:0}}>{curScene.number}</span>
           {curScene.slug&&<Tag label={curScene.slug} color={slugColor(curScene.slug)}/>}
           {curScene.dayNight&&<Tag label={curScene.dayNight} color={dnColor(curScene.dayNight)}/>}
           {curScene.eighths>0&&<Tag label={fmtEighths(curScene.eighths)+" pg"} color={c.t2}/>}
           <StatusPill status={curScene.status==="omitted"?"todo":curScene.status} onCycle={sceneCycle}/>
           {curScene.shootDay?<Chip color={c.accent} active><Calendar size={11}/>Day {curScene.shootDay}{curScene.shootOrder?` · #${curScene.shootOrder}`:""}</Chip>:<Chip color={c.t2}>unscheduled</Chip>}
-          {sbLoc&&<Chip color={c.t1} onClick={()=>openScene("__loc__"+sbLoc.id)}><MapPin size={11}/>{sbLoc.name.length>24?sbLoc.name.slice(0,23)+"…":sbLoc.name}</Chip>}
-          <div style={{flex:1,minWidth:6}}/>
-          <div style={{display:"flex",flexShrink:0,borderRadius:8,overflow:"hidden",border:`1px solid ${c.line2}`}}>
-            {[{k:"story",l:"Story"},{k:"shoot",l:"Shoot"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} title={o.k==="story"?"Story order":"Shooting order (sets prev/next order)"} style={{padding:"6px 10px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:11.5,fontWeight:700,cursor:"pointer"}}>{o.l}</button>)}
-          </div>
-          {neighbors&&<div style={{display:"flex",gap:4,flexShrink:0}}><IconBtn icon={ChevronLeft} size={18} onClick={()=>neighbors.prev&&openScene(neighbors.prev)} dim title="Previous scene" style={{opacity:neighbors.prev?1:0.3}}/><IconBtn icon={ChevronRight} size={18} onClick={()=>neighbors.next&&openScene(neighbors.next)} dim title="Next scene" style={{opacity:neighbors.next?1:0.3}}/></div>}
-          <IconBtn icon={Settings} onClick={()=>setInfo(curScene)} dim title="Edit scene info"/>
-          <IconBtn icon={Search} onClick={()=>setJump(true)} title="Jump ( / or Cmd-K )" dim/>
-        </>
-      ):(
-        <>
-          <div style={{flex:"1 1 auto",minWidth:0,fontFamily:UI,fontSize:wide?18:15,fontWeight:800,color:c.t0,letterSpacing:"-0.2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view==="scene"?(curScene?`Scene ${curScene.number}`:"Scene"):(TITLES[view]||project.meta.title)}</div>
-          <IconBtn icon={Search} onClick={()=>setJump(true)} title="Jump to scene ( / or Cmd-K )" dim/>
-          {(view==="scenes"||view==="scene")&&<div style={{display:"flex",flexShrink:0,borderRadius:9,overflow:"hidden",border:`1px solid ${c.line2}`}}>
-            {[{k:"story",l:wide?"Story":"Story"},{k:"shoot",l:wide?"Shooting":"Shoot"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} style={{padding:wide?"8px 14px":"7px 10px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:12.5,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{o.l}</button>)}
-          </div>}
-        </>
-      )}
-      {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error, will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
-        {sync.state==="syncing"||sync.state==="pending"?<RefreshCw size={15} color={c.accent}/>:sync.state==="error"?<Cloud size={15}/>:<CheckCircle2 size={15} color={c.ok}/>}
-        {wide&&<span>{sync.state==="syncing"||sync.state==="pending"?"Syncing":sync.state==="error"?"Sync off":"Synced"}</span>}
-      </div>}
-      {wide&&<IconBtn icon={c.bg0===DARK.bg0?SunMedium:MoonStar} dim title="Theme" onClick={()=>{const t=(project.meta.theme==="light")?"dark":"light";setProject(p=>({...p,meta:{...p.meta,theme:t}}));themeChange(t);}}/>}
+          {sbLoc&&<Chip color={c.t1} onClick={()=>openScene("__loc__"+sbLoc.id)}><MapPin size={11}/>{sbLoc.name.length>22?sbLoc.name.slice(0,21)+"…":sbLoc.name}</Chip>}
+        </>:<div style={{minWidth:0,fontFamily:UI,fontSize:wide?18:15,fontWeight:800,color:c.t0,letterSpacing:"-0.2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view==="scene"?(curScene?`Scene ${curScene.number}`:"Scene"):(TITLES[view]||project.meta.title)}</div>}
+      </div>
+      {/* FIXED CONTROL CLUSTER: identical order + position on every page (jump / sync / theme are pinned to
+          the right edge; the Story↔Shooting toggle sits in the same slot whenever it applies). */}
+      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+        {wide&&view==="scene"&&curScene&&neighbors&&<div style={{display:"flex",gap:2}}><IconBtn icon={ChevronLeft} size={18} onClick={()=>neighbors.prev&&openScene(neighbors.prev)} dim title="Previous scene" style={{opacity:neighbors.prev?1:0.3}}/><IconBtn icon={ChevronRight} size={18} onClick={()=>neighbors.next&&openScene(neighbors.next)} dim title="Next scene" style={{opacity:neighbors.next?1:0.3}}/></div>}
+        {wide&&view==="scene"&&curScene&&<IconBtn icon={Settings} onClick={()=>setInfo(curScene)} dim title="Edit scene info"/>}
+        {(view==="scenes"||view==="scene")&&<div style={{display:"flex",flexShrink:0,borderRadius:8,overflow:"hidden",border:`1px solid ${c.line2}`}}>
+          {[{k:"story",l:"Story"},{k:"shoot",l:wide?"Shooting":"Shoot"}].map(o=><button key={o.k} onClick={()=>setLens(o.k)} title={o.k==="story"?"Story order":"Shooting order (sets prev/next order)"} style={{padding:wide?"7px 12px":"6px 9px",border:"none",background:lens===o.k?c.accent:c.bg2,color:lens===o.k?"#17120a":c.t1,fontFamily:UI,fontSize:wide?12:11.5,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{o.l}</button>)}
+        </div>}
+        <IconBtn icon={Search} onClick={()=>setJump(true)} title="Jump ( / or Cmd-K )" dim/>
+        {hasKey&&<div title={{pending:"Sync queued",syncing:"Syncing…",synced:"Synced to cloud",error:"Sync error, will retry",off:"Cloud sync on",idle:"Synced"}[sync.state]||"Synced"} style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,fontFamily:UI,fontSize:11,color:sync.state==="error"?c.danger:c.t2}}>
+          {sync.state==="syncing"||sync.state==="pending"?<RefreshCw size={15} color={c.accent}/>:sync.state==="error"?<Cloud size={15}/>:<CheckCircle2 size={15} color={c.ok}/>}
+          {wide&&<span>{sync.state==="syncing"||sync.state==="pending"?"Syncing":sync.state==="error"?"Sync off":"Synced"}</span>}
+        </div>}
+        {wide&&<IconBtn icon={c.bg0===DARK.bg0?SunMedium:MoonStar} dim title="Theme" onClick={()=>{const t=(project.meta.theme==="light")?"dark":"light";setProject(p=>({...p,meta:{...p.meta,theme:t}}));themeChange(t);}}/>}
+      </div>
     </div>
   );
 
