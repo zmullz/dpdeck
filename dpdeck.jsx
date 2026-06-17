@@ -3095,6 +3095,51 @@ function sidesDays(project){
   else d=groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(z=>z.shootDate)||{}).shootDate||"",nums:[...sc].sort((a,b)=>(+a.shootOrder||0)-(+b.shootOrder||0)).map(z=>String(z.number))}));
   return d.filter(x=>x.day).sort((a,b)=>cmpNum(a.day,b.day));
 }
+// Print-safe sun-path block for DP Sides: an overhead sun-path arc + the full daily sun info
+// (sunrise/sunset times AND compass bearings, golden + blue hours, solar noon, peak elevation, daylight).
+// Uses print colors (SunCompass is themed for the dark UI and would not read on white paper).
+function SidesSun({lat,lng,tz,date}){
+  const A={text:"#161616",muted:"#6a6a6a",line:"#d4d4d4",gold:"#c8881b",accent:"#8a5a00"};
+  const data=useMemo(()=>{try{
+    const t=sunTimes(dayNoonUTC(date),+lat,+lng);
+    const path=[];for(let mn=0;mn<=1440;mn+=15){const p=sunPos(localToAbs(date,Math.floor(mn/60),mn%60,tz),+lat,+lng);path.push({az:azC(p.az).deg,alt:p.alt*180/PI});}
+    const azOf=d=>(d&&!isNaN(d))?azC(sunPos(d,+lat,+lng).az):null;
+    return {t,sr:azOf(t.sunrise),ss:azOf(t.sunset),noonAlt:sunPos(t.noon,+lat,+lng).alt*180/PI,path};
+  }catch{return null;}},[lat,lng,date,tz]);
+  if(!data)return null;
+  const {t}=data,cardOf=deg=>CARD[Math.round((((deg%360)+360)%360)/22.5)%16];
+  const R=52,cx=60,cy=60,S=120;
+  const pt=(deg,r)=>[cx+r*Math.sin(deg*rad),cy-r*Math.cos(deg*rad)];
+  const rOf=alt=>R*(1-Math.max(0,Math.min(alt,90))/90);
+  const above=data.path.filter(p=>p.alt>=-0.4);
+  const ptsFor=arr=>arr.map(p=>{const [x,y]=pt(p.az,rOf(Math.max(0,p.alt)));return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(" ");
+  const dayPts=ptsFor(above),goldPts=ptsFor(above.filter(p=>p.alt<=6));
+  const dayLen=(t.sunrise&&t.sunset&&!isNaN(t.sunrise)&&!isNaN(t.sunset))?(()=>{const mins=Math.round((t.sunset-t.sunrise)/60000);return `${Math.floor(mins/60)}h ${String(mins%60).padStart(2,"0")}m`;})():null;
+  const card=(deg,tx)=>{const [x,y]=pt(deg,R+9);return <text x={x.toFixed(1)} y={(y+3).toFixed(1)} textAnchor="middle" style={{fontFamily:MONO,fontSize:8,fill:A.muted}}>{tx}</text>;};
+  const Row=({l,v})=><div style={{display:"flex",gap:8}}><span style={{color:A.muted,minWidth:74}}>{l}</span><span style={{color:A.text,fontWeight:600}}>{v}</span></div>;
+  return <div style={{display:"flex",gap:14,alignItems:"flex-start",flexWrap:"wrap",marginTop:6}}>
+    <svg width={S} height={S} viewBox={`0 0 ${S} ${S}`} style={{flexShrink:0}}>
+      <circle cx={cx} cy={cy} r={R} fill="#fafafa" stroke={A.line} strokeWidth={1}/>
+      <circle cx={cx} cy={cy} r={rOf(30)} fill="none" stroke={A.line} strokeWidth={0.5}/>
+      <circle cx={cx} cy={cy} r={rOf(60)} fill="none" stroke={A.line} strokeWidth={0.5}/>
+      <line x1={cx-R} y1={cy} x2={cx+R} y2={cy} stroke={A.line} strokeWidth={0.5}/>
+      <line x1={cx} y1={cy-R} x2={cx} y2={cy+R} stroke={A.line} strokeWidth={0.5}/>
+      {dayPts&&<polyline points={dayPts} fill="none" stroke={A.accent} strokeWidth={1.6} strokeLinejoin="round"/>}
+      {goldPts&&<polyline points={goldPts} fill="none" stroke={A.gold} strokeWidth={2.6} strokeLinejoin="round" strokeLinecap="round"/>}
+      <circle cx={cx} cy={cy} r={2} fill={A.muted}/>
+      {card(0,"N")}{card(90,"E")}{card(180,"S")}{card(270,"W")}
+    </svg>
+    <div style={{fontFamily:UI,fontSize:11.5,lineHeight:1.65,minWidth:210}}>
+      <Row l="Sunrise" v={`${fmtT(t.sunrise,tz)}${data.sr?` · ${Math.round(data.sr.deg)}° ${data.sr.card}`:""}`}/>
+      <Row l="Golden AM" v={`${fmtT(t.sunrise,tz)} to ${fmtT(t.goldEnd,tz)}`}/>
+      <Row l="Solar noon" v={`${fmtT(t.noon,tz)} · sun ${Math.round(data.noonAlt)}° up`}/>
+      <Row l="Golden PM" v={`${fmtT(t.goldStart,tz)} to ${fmtT(t.sunset,tz)}`}/>
+      <Row l="Sunset" v={`${fmtT(t.sunset,tz)}${data.ss?` · ${Math.round(data.ss.deg)}° ${data.ss.card}`:""}`}/>
+      <Row l="Blue hour" v={`${fmtT(t.dawn,tz)} AM · ${fmtT(t.dusk,tz)} PM`}/>
+      {dayLen&&<Row l="Daylight" v={dayLen}/>}
+    </div>
+  </div>;
+}
 function SidesDoc({project,dayFilter}){
   const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00",soft:"#f5f2ec"};
   const m=project.meta||{};
@@ -3122,12 +3167,13 @@ function SidesDoc({project,dayFilter}){
             <span style={{fontFamily:MONO,fontSize:12,color:P.muted}}>{scenes.length} scene{scenes.length===1?"":"s"}{eighths?` · ${fmtEighths(eighths)} pg`:""}</span>
           </div>
           <div style={{fontFamily:UI,fontSize:11.5,color:P.muted,marginTop:5}}>{m.title||"Untitled Film"}{dloc?` · ${dloc.name}`:""}</div>
-          {dloc&&dloc.lat!=null&&dloc.lat!==""&&day.date&&<div style={{fontFamily:UI,fontSize:11.5,color:P.text,marginTop:5,lineHeight:1.7}}>
-            <div><b>Sun:</b> <ExportSun lat={dloc.lat} lng={dloc.lng} tz={m.tz} date={day.date}/></div>
-            <div><b>Weather:</b> <PrintWeather lat={dloc.lat} lng={dloc.lng} date={day.date}/></div>
+          {dloc&&dloc.lat!=null&&dloc.lat!==""&&day.date&&<div style={{marginTop:6}}>
+            <div style={{fontFamily:UI,fontSize:11.5,color:P.text}}><b>Weather:</b> <PrintWeather lat={dloc.lat} lng={dloc.lng} date={day.date}/></div>
+            <SidesSun lat={dloc.lat} lng={dloc.lng} tz={m.tz} date={day.date}/>
           </div>}
         </div>
         {DEPTS.some(d=>gear[d.k].size)&&<div style={{marginBottom:12}}><span style={sub}>Gear this day</span><div style={{marginTop:3}}>{DEPTS.map(d=>gear[d.k].size?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {[...gear[d.k]].join(", ")}</div>:null)}</div></div>}
+        {(()=>{const dl=[...new Set(scenes.map(s=>s.locationId).filter(Boolean))].map(id=>project.locations.find(l=>l.id===id)).filter(l=>l&&l.images&&l.images.length);return dl.length?<div style={{marginBottom:14}}>{dl.map(l=><div key={l.id} style={{marginBottom:8}}><span style={sub}>{l.name} · location photos</span>{imgRow((l.images||[]).slice(0,6),120)}</div>)}</div>:null;})()}
         {scenes.map((s,si)=>{const l=loc(s.locationId);const g=gearOf(s);return <div key={s.number+"_"+si} className="pd-scene" style={{marginBottom:16,paddingBottom:13,borderBottom:`1px solid ${P.line}`}}>
           <div style={{display:"flex",alignItems:"baseline",gap:9,flexWrap:"wrap"}}>
             {s.shootOrder?<span style={{fontFamily:MONO,fontSize:11,color:P.muted}}>#{s.shootOrder}</span>:null}
@@ -3143,7 +3189,7 @@ function SidesDoc({project,dayFilter}){
           {s.notes&&<div style={{marginTop:6}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
           {s.shots.length>0&&<div style={{marginTop:6}}><span style={sub}>Shots</span><div style={{marginTop:3}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12,lineHeight:1.5,display:"flex",gap:7}}><span style={{color:P.muted,fontFamily:MONO,fontSize:10,minWidth:16}}>{i+1}.</span><span>{sh.text}</span></div>)}</div></div>}
           {g.length>0&&<div style={{marginTop:6}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const di=g.filter(x=>x.dept===d.k);return di.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {di.map(x=>x.name).join(", ")}</div>:null;})}</div></div>}
-          {imgRow(s.refs,110)}
+          {s.refs.length>0&&<div style={{marginTop:6}}><span style={sub}>Reference</span>{imgRow(s.refs,110)}</div>}
         </div>;})}
       </div>;
     })}
