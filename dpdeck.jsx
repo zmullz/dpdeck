@@ -1108,7 +1108,7 @@ function useWeather(lat,lng,date){
     const key=`${(+lat).toFixed(3)},${(+lng).toFixed(3)},${date}`;
     if(wxCache.has(key)){setSt(wxCache.get(key));return;}
     setSt({s:"load"});
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=16`).then(r=>r.json()).then(d=>{if(!on)return;const i=d?.daily?.time?d.daily.time.indexOf(date):-1;let r;if(i<0)r={s:"far"};else r={s:"ok",code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]};wxCache.set(key,r);setSt(r);}).catch(()=>{if(on)setSt({s:"err"});});
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=16`).then(r=>r.json()).then(d=>{if(!on)return;const i=d?.daily?.time?d.daily.time.indexOf(date):-1;let r;if(i<0)r={s:"far"};else r={s:"ok",code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]};wxCache.set(key,r);setSt(r);}).catch(()=>{if(on)setSt({s:"err"});});
     return()=>{on=false;};},[lat,lng,date]);
   return st;
 }
@@ -1124,7 +1124,7 @@ function WeatherCard({lat,lng,tz,date}){
     {st.s==="load"&&<div style={{color:c.t2,fontFamily:UI,fontSize:13}}>Checking forecast…</div>}
     {st.s==="far"&&<div style={{color:c.t2,fontFamily:UI,fontSize:13}}>Forecast opens about 16 days out. {date} is still too far ahead.</div>}
     {st.s==="err"&&<div style={{color:c.t2,fontFamily:UI,fontSize:13}}>Couldn't reach the forecast.</div>}
-    {st.s==="ok"&&(()=>{const {Icon,label}=wxMeta(st.code);return <div style={{display:"flex",alignItems:"center",gap:16}}><Icon size={38} color={c.accent} strokeWidth={1.4}/><div><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{label}</div><div style={{display:"flex",gap:15,marginTop:5,flexWrap:"wrap"}}><span><Label>Hi/Lo</Label><div><Val size={15}>{Math.round(st.hi)}° / {Math.round(st.lo)}°C</Val></div></span><span><Label>Rain</Label><div><Val size={15} style={{color:st.pr>=50?c.day:c.t0}}>{st.pr==null?"—":st.pr+"%"}</Val></div></span><span><Label>Wind</Label><div><Val size={15}>{Math.round(st.wind)} km/h</Val></div></span></div></div></div>;})()}
+    {st.s==="ok"&&(()=>{const {Icon,label}=wxMeta(st.code);return <div style={{display:"flex",alignItems:"center",gap:16}}><Icon size={38} color={c.accent} strokeWidth={1.4}/><div><div style={{fontFamily:UI,fontSize:16,fontWeight:700,color:c.t0}}>{label}</div><div style={{display:"flex",gap:15,marginTop:5,flexWrap:"wrap"}}><span><Label>Hi/Lo</Label><div><Val size={15}>{Math.round(st.hi)}° / {Math.round(st.lo)}°F</Val></div></span><span><Label>Rain</Label><div><Val size={15} style={{color:st.pr>=50?c.day:c.t0}}>{st.pr==null?"—":st.pr+"%"}</Val></div></span><span><Label>Wind</Label><div><Val size={15}>{Math.round(st.wind)} mph</Val></div></span></div></div></div>;})()}
     <div style={{fontFamily:MONO,fontSize:10,color:c.t2,marginTop:10}}>Open-Meteo · refreshes each visit</div>
   </Card>;
 }
@@ -1813,7 +1813,7 @@ function useForecast(lat,lng){
     const key=`${(+lat).toFixed(3)},${(+lng).toFixed(3)}`;
     if(fcCache.has(key)){setSt(fcCache.get(key));return;}
     setSt({s:"load"});
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=14`).then(r=>r.json()).then(d=>{if(!on)return;const t=d?.daily?.time||[];const days=t.map((date,i)=>({date,code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]}));const r={s:"ok",days};fcCache.set(key,r);setSt(r);}).catch(()=>{if(on)setSt({s:"err"});});
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=14`).then(r=>r.json()).then(d=>{if(!on)return;const t=d?.daily?.time||[];const days=t.map((date,i)=>({date,code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]}));const r={s:"ok",days};fcCache.set(key,r);setSt(r);}).catch(()=>{if(on)setSt({s:"err"});});
     return()=>{on=false;};},[lat,lng]);
   return st;
 }
@@ -1835,7 +1835,7 @@ function WeekAhead({project,onOpen}){
       {dates.map(dt=>{const w=wx.get(dt);const sh=byDate.get(dt);const today=dt===ti;const dd=new Date(dt+"T12:00");const Icon=w?wxMeta(w.code).Icon:null;
         return <div key={dt} style={{flexShrink:0,width:112,background:today?c.accentSoft:c.bg1,border:`1px solid ${today?c.accent:c.line}`,borderRadius:11,padding:"9px 10px",display:"flex",flexDirection:"column",gap:6}}>
           <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}><span style={{fontFamily:UI,fontSize:11.5,fontWeight:700,color:today?c.accent:c.t1}}>{today?"Today":dd.toLocaleDateString(undefined,{weekday:"short"})}</span><span style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{dd.toLocaleDateString(undefined,{month:"short",day:"numeric"})}</span></div>
-          <div style={{display:"flex",alignItems:"center",gap:7,minHeight:30}}>{Icon?<><Icon size={26} color={c.accent} strokeWidth={1.5}/><div><div style={{fontFamily:MONO,fontSize:12.5,color:c.t0}}>{w.hi!=null?`${Math.round(w.hi)}°`:"--"}<span style={{color:c.t2}}> / {w.lo!=null?`${Math.round(w.lo)}°`:"--"}</span></div><div style={{fontFamily:MONO,fontSize:10,color:w.pr>=50?c.day:c.t2}}>{w.pr!=null?`${w.pr}%`:""}</div></div></>:<span style={{fontFamily:UI,fontSize:11,color:c.t2}}>{fc.s==="load"?"…":"beyond forecast"}</span>}</div>
+          <div style={{display:"flex",alignItems:"center",gap:7,minHeight:30}}>{Icon?<><Icon size={26} color={c.accent} strokeWidth={1.5}/><div><div style={{fontFamily:MONO,fontSize:12.5,color:c.t0}}>{w.hi!=null?`${Math.round(w.hi)}°`:"--"}<span style={{color:c.t2}}> / {w.lo!=null?`${Math.round(w.lo)}°F`:"--"}</span></div><div style={{fontFamily:MONO,fontSize:10,color:w.pr>=50?c.day:c.t2}}>{w.pr!=null?`${w.pr}%`:""}</div></div></>:<span style={{fontFamily:UI,fontSize:11,color:c.t2}}>{fc.s==="load"?"…":"beyond forecast"}</span>}</div>
           {sh?<button onClick={()=>onOpen&&onOpen(sh.scenes[0])} title={`Day ${sh.day}`} style={{fontFamily:UI,fontSize:10.5,fontWeight:700,color:c.accent,background:c.accentSoft,border:`1px solid ${c.accent}55`,borderRadius:6,padding:"3px 6px",cursor:"pointer",textAlign:"left"}}>Day {sh.day} · {sh.scenes.length} sc</button>:<span style={{fontFamily:UI,fontSize:10.5,color:c.t2,padding:"3px 0"}}>no shoot</span>}
         </div>;})}
     </div>
@@ -1929,6 +1929,11 @@ function Dashboard({project,onOpen,onNav}){
 
     {nextDay?<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>{today?"Today's sides":"Next shoot day"}</Label><button onClick={()=>onNav("days")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Full schedule →</button></div><DayHero d={nextDay} big={!!today}/></div>
       :<div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:14,padding:"15px 16px",fontFamily:UI,fontSize:13.5,color:c.t1}}>No shoot schedule loaded yet. Drop the schedule in Import, or hand Claude the call sheet.</div>}
+
+    {nextDay&&(()=>{const sloc=dayLocation(nextDay.scenes,locs);return (sloc&&sloc.lat)?<div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:8,flexWrap:"wrap"}}><Label>Sun · Day {nextDay.day} · {sloc.name}</Label><span style={{fontFamily:MONO,fontSize:11,color:c.t2}}>{fmtD(nextDay.date)}</span></div>
+      <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}><SunPanel lat={sloc.lat} lng={sloc.lng} tz={meta.tz} date={nextDay.date}/></div>
+    </div>:null;})()}
 
     {nextDay2&&<div><Label style={{marginBottom:7}}>{today?"Next day":"Then"}</Label><DayHero d={nextDay2}/></div>}
 
