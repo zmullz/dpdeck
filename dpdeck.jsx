@@ -6,6 +6,7 @@ import {
   CloudDrizzle, CloudLightning, Navigation, Phone, Mail, Volume2, Settings,
   MoonStar, SunMedium, Sparkles, Clock, ListChecks, Compass, Maximize2, CloudDownload, Home, Printer,
   ArrowLeft, ArrowRight, Copy, Send, GripVertical, BookOpen, RefreshCw, CheckCircle2,
+  Aperture, Minus, ChevronUp, RotateCw, Grid3x3,
 } from "lucide-react";
 import { get as idbGet, set as idbSet, del as idbDel, keys as idbKeys, createStore as idbCreateStore } from "idb-keyval";
 
@@ -974,7 +975,7 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title,draftKey}){
   const up=()=>{if(draw.current){const st=draw.current;draw.current=null;if(st.pts.length)setStrokes(s=>[...s,st]);else render();}drag.current=null;};
   const save=()=>{onSave({strokes,aspect:aspect.current,bgUrl:bgUrl||initial?.bgUrl||null});if(dkey)store.del(dkey).catch(()=>{});onClose();};
   return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:90,display:"flex",flexDirection:"column"}}>
-    <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderBottom:`1px solid ${c.line}`,background:c.bg1}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,paddingTop:"max(env(safe-area-inset-top), 10px)",paddingBottom:10,paddingLeft:"max(env(safe-area-inset-left), 12px)",paddingRight:"max(env(safe-area-inset-right), 12px)",borderBottom:`1px solid ${c.line}`,background:c.bg1}}>
       <IconBtn icon={X} onClick={onClose} size={18} dim title="Close"/>
       <div style={{flex:1,fontFamily:UI,fontWeight:700,fontSize:15,color:c.t0}}>{title||"Sketch"}</div>
       <Btn kind="primary" size={12} onClick={save}><Check size={15}/>Done</Btn>
@@ -987,7 +988,7 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title,draftKey}){
         <IconBtn icon={Crosshair} onClick={()=>setView({s:1,tx:0,ty:0})}/>
       </div>
     </div>
-    <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderTop:`1px solid ${c.line}`,background:c.bg1,flexWrap:"wrap"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,paddingTop:10,paddingBottom:"max(env(safe-area-inset-bottom), 10px)",paddingLeft:"max(env(safe-area-inset-left), 12px)",paddingRight:"max(env(safe-area-inset-right), 12px)",borderTop:`1px solid ${c.line}`,background:c.bg1,flexWrap:"wrap"}}>
       <IconBtn icon={PenLine} active={tool==="pen"} onClick={()=>setTool("pen")} title="Draw"/>
       <IconBtn icon={Eraser} active={tool==="erase"} onClick={()=>setTool("erase")} title="Erase"/>
       <IconBtn icon={Maximize2} active={tool==="pan"} onClick={()=>setTool("pan")} title="Pan"/>
@@ -996,6 +997,169 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title,draftKey}){
       {INK_COLORS.map(col=><button key={col} onClick={()=>{setColor(col);setTool("pen");}} style={{width:26,height:26,borderRadius:"50%",background:col,border:color===col?`2px solid ${c.t0}`:`2px solid ${c.line2}`,cursor:"pointer"}}/>)}
       <div style={{display:"flex",gap:6,marginLeft:4}}>{[2,3,5,8].map(x=><button key={x} onClick={()=>setW(x)} style={{width:34,height:30,borderRadius:7,background:w===x?c.bg3:c.bg2,border:`1px solid ${w===x?c.accent:c.line2}`,cursor:"pointer",display:"grid",placeItems:"center"}}><div style={{width:16,height:x,borderRadius:x,background:c.t0}}/></button>)}</div>
     </div>
+  </div>;
+}
+
+/* DIRECTOR'S VIEWFINDER: live framing for 4-perf 35mm open gate.
+   The phone feed is the open-gate (1.33) "sensor"; aspect-ratio guides (1.66/1.78/1.85/2.0/2.39)
+   OVERLAY the full open-gate frame as bright framelines + dimmed mattes and never hard-crop it.
+   Focal length steps from the active phone lens's widest up to 300mm via DIGITAL zoom (iOS Safari
+   has no hardware zoom and no ImageCapture). Snap saves the full open-gate still, guides burned in,
+   to wherever the viewfinder was opened. The 0.5x ultra-wide on this gate is ~9mm (its 13mm spec is
+   a full-frame STILLS equivalent: 13 * 24.89/36 = ~9mm), the main lens ~17mm, so the wide end depends
+   on which phone lens is active. Calibration is a manual nudge because iOS exposes no true FOV. */
+const VF_GATE_W=24.89, VF_GATE_H=18.66, VF_AR=VF_GATE_W/VF_GATE_H; // 4-perf 35mm full/open aperture (1.333)
+const VF_FOCALS=[9,10,12,14,16,18,21,25,27,32,35,40,50,65,75,85,100,135,150,180,200,250,300];
+const VF_RATIOS=[{k:"1.33",label:"Open Gate",r:VF_AR},{k:"1.66",label:"1.66",r:5/3},{k:"1.78",label:"16:9",r:16/9},{k:"1.85",label:"1.85",r:1.85},{k:"2.00",label:"2.0",r:2},{k:"2.39",label:"2.39",r:2.39}];
+const VF_CAM_HFOV={ultra:108.3,wide:73.7,tele:26.3};                 // approx native horizontal FOV per phone lens
+const vfHfov=f=>2*Math.atan(VF_GATE_W/(2*f))*180/Math.PI;
+const vfFocalForHfov=d=>VF_GATE_W/(2*Math.tan(d*Math.PI/360));
+const vfGuessLens=l=>{const s=(l||"").toLowerCase();if(/ultra|0\.5|0,5/.test(s))return"ultra";if(/tele|telephoto|3x|5x|2x/.test(s))return"tele";return"wide";};
+const vfLensLabel={ultra:"0.5×",wide:"1×",tele:"tele"};
+function vfRatioBox(W,H,r){const fr=W/H;if(r>=fr){const h=W/r;return{x:0,y:(H-h)/2,w:W,h};}const w=H*r;return{x:(W-w)/2,y:0,w,h:H};}
+function vfTopBtn(on){return{background:on?"#ffffff22":"transparent",border:"none",color:on?"#ffd24d":"#fff",cursor:"pointer",display:"grid",placeItems:"center",width:34,height:34,borderRadius:8};}
+function vfChip(on){return{flexShrink:0,padding:"6px 11px",borderRadius:16,border:`1px solid ${on?"#ffd24d":"#333"}`,background:on?"#ffd24d":"#161616",color:on?"#000":"#bbb",fontFamily:UI,fontSize:12.5,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"};}
+function vfRound(){return{flexShrink:0,width:38,height:38,borderRadius:"50%",border:"1px solid #333",background:"#161616",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"};}
+function Viewfinder({title,onCapture,onClose}){
+  const videoRef=useRef(null),areaRef=useRef(null),streamRef=useRef(null),fileRef=useRef(null);
+  const [started,setStarted]=useState(false),[err,setErr]=useState(""),[busy,setBusy]=useState(false);
+  const [cams,setCams]=useState([]),[lens,setLens]=useState("wide"),[calib,setCalib]=useState(0),[showCal,setShowCal]=useState(false);
+  const [focal,setFocal]=useState(35),[ratio,setRatio]=useState("1.85"),[grid,setGrid]=useState(false),[burn,setBurn]=useState(true);
+  const [gate,setGate]=useState({w:0,h:0}),[saved,setSaved]=useState(0),[flash,setFlash]=useState(false),[switchErr,setSwitchErr]=useState("");
+  const nativeHFOV=Math.max(20,(VF_CAM_HFOV[lens]||73.7)+calib);
+  const fNative=vfFocalForHfov(nativeHFOV);
+  // widest selectable = the lens's true native focal (rounded), then standard primes strictly wider than native.
+  // This keeps the widest step honestly labeled (you can't digitally zoom wider than the lens).
+  const fWide=Math.round(fNative);
+  const focals=[fWide,...VF_FOCALS.filter(f=>f>fNative+0.5)];
+  const zoom=Math.max(1,focal/fNative);
+  const ratioObj=VF_RATIOS.find(x=>x.k===ratio)||VF_RATIOS[3];
+
+  const stopStream=useCallback(()=>{const s=streamRef.current;if(s)s.getTracks().forEach(t=>{try{t.stop();}catch{}});streamRef.current=null;const v=videoRef.current;if(v)v.srcObject=null;},[]);
+  const attach=useCallback(s=>{const old=streamRef.current;if(old&&old!==s)old.getTracks().forEach(t=>{try{t.stop();}catch{}});streamRef.current=s;const v=videoRef.current;if(v){v.srcObject=s;v.play().catch(()=>{});}},[]);
+  const start=useCallback(async(deviceId)=>{
+    setErr("");
+    try{
+      if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("nogum");
+      const video=deviceId?{deviceId:{exact:deviceId},width:{ideal:1920},height:{ideal:1440}}:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1440}};
+      const s=await navigator.mediaDevices.getUserMedia({video,audio:false});
+      attach(s);
+      try{const devs=await navigator.mediaDevices.enumerateDevices();const vids=devs.filter(d=>d.kind==="videoinput");const rear=vids.filter(d=>!/front|face/i.test(d.label));setCams((rear.length?rear:vids).map(d=>({id:d.deviceId,label:d.label,lens:vfGuessLens(d.label)})));}catch{}
+      const tr=s.getVideoTracks()[0];setLens(vfGuessLens(tr&&tr.label));
+      setStarted(true);
+    }catch(e){stopStream();setStarted(false);setErr(e&&e.name==="NotAllowedError"?"denied":(e&&e.message==="nogum"?"nogum":"fail"));}
+  },[attach,stopStream]);
+  // Switch phone lens WITHOUT tearing down the working stream first: acquire the new lens, swap only on
+  // success (attach stops the old), and if iOS rejects the exact-deviceId request keep the live feed + warn.
+  const switchTo=useCallback(async cm=>{
+    try{
+      const s=await navigator.mediaDevices.getUserMedia({video:{deviceId:{exact:cm.id},width:{ideal:1920},height:{ideal:1440}},audio:false});
+      attach(s);setLens(cm.lens);setSwitchErr("");
+    }catch(e){setSwitchErr("Couldn't switch to that lens on this device.");setTimeout(()=>setSwitchErr(""),2600);}
+  },[attach]);
+
+  useEffect(()=>()=>stopStream(),[stopStream]);
+  // iOS freezes/mutes a live track when the app is backgrounded; stop it and require a re-tap on return.
+  useEffect(()=>{const onVis=()=>{if(document.visibilityState==="hidden"){stopStream();setStarted(false);}};document.addEventListener("visibilitychange",onVis);return()=>document.removeEventListener("visibilitychange",onVis);},[stopStream]);
+  // keep the focal within the active lens's achievable range (can't go wider than the phone lens)
+  useEffect(()=>{if(focal<fNative-0.6&&focals.length)setFocal(focals[0]);},[lens,calib]);// eslint-disable-line
+  // measure the open-gate box to fit the available area
+  useEffect(()=>{const fit=()=>{const el=areaRef.current;if(!el)return;const W=el.clientWidth-8,H=el.clientHeight-8;if(W<=0||H<=0)return;const w=Math.min(W,H*VF_AR);setGate({w:Math.round(w),h:Math.round(w/VF_AR)});};fit();addEventListener("resize",fit);addEventListener("orientationchange",fit);const t=setTimeout(fit,350);return()=>{removeEventListener("resize",fit);removeEventListener("orientationchange",fit);clearTimeout(t);};},[started]);
+
+  const stepFocal=d=>{const i=focals.indexOf(focal);const ni=clamp((i<0?0:i)+d,0,focals.length-1);setFocal(focals[ni]);};
+  const drawGuides=(ctx,W,H)=>{
+    const b=vfRatioBox(W,H,ratioObj.r);
+    if(ratioObj.k!=="1.33"){ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(0,0,W,b.y);ctx.fillRect(0,b.y+b.h,W,H-(b.y+b.h));}
+    ctx.strokeStyle="rgba(255,255,255,0.92)";ctx.lineWidth=Math.max(1.5,W/640);ctx.strokeRect(b.x+1,b.y+1,b.w-2,b.h-2);
+    const fs=Math.max(12,Math.round(W/42));ctx.fillStyle="rgba(255,210,77,0.96)";ctx.font=`700 ${fs}px ui-monospace,monospace`;ctx.textBaseline="bottom";
+    ctx.fillText(`${focal}mm  ${ratioObj.k}  ${vfHfov(focal).toFixed(0)}°`,Math.round(W*0.03),H-Math.round(W*0.03));
+  };
+  const capture=async()=>{
+    const v=videoRef.current;if(!v||!v.videoWidth){setErr("fail");return;}
+    setBusy(true);
+    try{
+      const vw=v.videoWidth,vh=v.videoHeight;
+      let cw,ch;if(vw/vh>VF_AR){ch=vh;cw=vh*VF_AR;}else{cw=vw;ch=vw/VF_AR;}   // center-crop the source to open-gate aspect
+      cw/=zoom;ch/=zoom;const sx=(vw-cw)/2,sy=(vh-ch)/2;                       // then crop further for the digital zoom
+      const outW=Math.min(1920,Math.round(cw)),outH=Math.round(outW/VF_AR);
+      const cv=document.createElement("canvas");cv.width=outW;cv.height=outH;
+      const ctx=cv.getContext("2d");ctx.drawImage(v,sx,sy,cw,ch,0,0,outW,outH);
+      if(burn)drawGuides(ctx,outW,outH);
+      const url=cv.toDataURL("image/jpeg",0.85);
+      await onCapture(url);
+      setSaved(n=>n+1);setFlash(true);setTimeout(()=>setFlash(false),170);
+    }catch(e){setErr("fail");}
+    setBusy(false);
+  };
+  const onFile=async f=>{if(!f)return;setBusy(true);try{const url=await downscale(f,1920,0.85);await onCapture(url);setSaved(n=>n+1);}catch{}setBusy(false);};
+
+  const ob=vfRatioBox(gate.w||1,gate.h||1,ratioObj.r);
+  return <div style={{position:"fixed",inset:0,background:"#000",zIndex:98,display:"flex",flexDirection:"column"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,paddingTop:"max(env(safe-area-inset-top), 10px)",paddingBottom:10,paddingLeft:"max(env(safe-area-inset-left), 12px)",paddingRight:"max(env(safe-area-inset-right), 12px)",background:"#000",flexShrink:0}}>
+      <button onClick={()=>{stopStream();onClose();}} title="Close" style={vfTopBtn(false)}><X size={19}/></button>
+      <div style={{flex:1,minWidth:0,fontFamily:UI,fontWeight:700,fontSize:14,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title||"Viewfinder"}</div>
+      {started&&<button onClick={()=>setBurn(b=>!b)} title="Burn guides into the saved photo" style={vfTopBtn(burn)}><Aperture size={17}/></button>}
+      {started&&<button onClick={()=>setGrid(g=>!g)} title="Thirds grid" style={vfTopBtn(grid)}><Grid3x3 size={17}/></button>}
+      {started&&<button onClick={()=>setShowCal(s=>!s)} title="Calibrate field of view" style={vfTopBtn(showCal)}><Settings size={17}/></button>}
+    </div>
+    <div ref={areaRef} style={{flex:1,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden"}}>
+      <div style={{position:"relative",width:gate.w||1,height:gate.h||1,overflow:"hidden",background:"#000",visibility:started&&gate.w>0?"visible":"hidden"}}>
+        <video ref={videoRef} playsInline autoPlay muted style={{position:"absolute",left:"50%",top:"50%",width:"100%",height:"100%",objectFit:"cover",transform:`translate(-50%,-50%) scale(${zoom})`,transformOrigin:"center center"}}/>
+        {started&&gate.w>0&&<svg width={gate.w} height={gate.h} style={{position:"absolute",inset:0,pointerEvents:"none"}}>
+          <rect x="1" y="1" width={gate.w-2} height={gate.h-2} fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="1"/>
+          {ratioObj.k!=="1.33"&&<>
+            <rect x="0" y="0" width={gate.w} height={ob.y} fill="rgba(0,0,0,0.5)"/>
+            <rect x="0" y={ob.y+ob.h} width={gate.w} height={gate.h-(ob.y+ob.h)} fill="rgba(0,0,0,0.5)"/>
+          </>}
+          <rect x={ob.x+0.75} y={ob.y+0.75} width={Math.max(0,ob.w-1.5)} height={Math.max(0,ob.h-1.5)} fill="none" stroke="rgba(255,255,255,0.92)" strokeWidth="1.5"/>
+          <line x1={gate.w/2-9} y1={gate.h/2} x2={gate.w/2+9} y2={gate.h/2} stroke="rgba(255,255,255,0.7)" strokeWidth="1"/>
+          <line x1={gate.w/2} y1={gate.h/2-9} x2={gate.w/2} y2={gate.h/2+9} stroke="rgba(255,255,255,0.7)" strokeWidth="1"/>
+          {grid&&<g stroke="rgba(255,255,255,0.28)" strokeWidth="1">
+            <line x1={ob.x+ob.w/3} y1={ob.y} x2={ob.x+ob.w/3} y2={ob.y+ob.h}/>
+            <line x1={ob.x+2*ob.w/3} y1={ob.y} x2={ob.x+2*ob.w/3} y2={ob.y+ob.h}/>
+            <line x1={ob.x} y1={ob.y+ob.h/3} x2={ob.x+ob.w} y2={ob.y+ob.h/3}/>
+            <line x1={ob.x} y1={ob.y+2*ob.h/3} x2={ob.x+ob.w} y2={ob.y+2*ob.h/3}/>
+          </g>}
+        </svg>}
+        {started&&gate.w>0&&<div style={{position:"absolute",left:8,bottom:6,fontFamily:MONO,fontSize:11,fontWeight:700,color:"#ffd24d",textShadow:"0 1px 3px #000",pointerEvents:"none"}}>{focal}mm · {ratioObj.k} · {vfHfov(focal).toFixed(0)}°</div>}
+      </div>
+      {flash&&<div style={{position:"absolute",inset:0,background:"#fff",opacity:0.5,pointerEvents:"none"}}/>}
+      {started&&switchErr&&<div style={{position:"absolute",top:10,left:"50%",transform:"translateX(-50%)",background:"#000c",color:"#fff",fontFamily:UI,fontSize:12.5,padding:"7px 12px",borderRadius:8,maxWidth:"90%",textAlign:"center",pointerEvents:"none"}}>{switchErr}</div>}
+      {!started&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:15,padding:24,textAlign:"center"}}>
+        {err==="denied"?<div style={{color:"#fff",fontFamily:UI,fontSize:14,maxWidth:300,lineHeight:1.55}}>Camera access was denied. Allow the camera for this app in iOS Settings, or upload a photo instead.</div>:
+         err==="nogum"?<div style={{color:"#fff",fontFamily:UI,fontSize:14,maxWidth:300,lineHeight:1.55}}>This browser can't open a live camera here. Use the native camera or upload instead.</div>:
+         err==="fail"?<div style={{color:"#fff",fontFamily:UI,fontSize:14,maxWidth:300,lineHeight:1.55}}>Couldn't start the camera. Try again, or upload a photo.</div>:
+         <div style={{color:"#9aa",fontFamily:UI,fontSize:13,maxWidth:330,lineHeight:1.55}}>Director's viewfinder for 4-perf 35mm open gate. Pick a lens and aspect ratio, frame, and shoot. Photos save to {title||"this area"}.</div>}
+        <Btn kind="primary" size={14} onClick={()=>start()}><Camera size={17}/>Start camera</Btn>
+        <button onClick={()=>fileRef.current&&fileRef.current.click()} style={{background:"none",border:"none",color:"#8ab4d8",fontFamily:UI,fontSize:13,cursor:"pointer"}}>Use the native camera / upload instead</button>
+      </div>}
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];e.target.value="";onFile(f);}}/>
+    </div>
+    {showCal&&started&&<div style={{background:"#111",borderTop:"1px solid #222",padding:"10px 14px",flexShrink:0}}>
+      <div style={{fontFamily:UI,fontSize:11.5,color:"#aaa",marginBottom:7,lineHeight:1.4}}>Calibrate if the framing looks off. Active lens reads as ~{Math.round(fNative)}mm at its widest ({nativeHFOV.toFixed(0)}° across). The 0.5× ultra-wide is about 9mm on this gate, the 1× about 17mm.</div>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontFamily:MONO,fontSize:11,color:"#888"}}>wider</span>
+        <input type="range" min="-25" max="25" step="1" value={calib} onChange={e=>setCalib(+e.target.value)} style={{flex:1}}/>
+        <span style={{fontFamily:MONO,fontSize:11,color:"#888"}}>tighter</span>
+        <button onClick={()=>setCalib(0)} style={{background:"#222",border:"1px solid #333",color:"#ccc",borderRadius:6,padding:"5px 10px",fontFamily:UI,fontSize:12,cursor:"pointer"}}>Reset</button>
+      </div>
+    </div>}
+    {started&&<div style={{background:"#000",flexShrink:0,paddingTop:8,paddingBottom:"max(env(safe-area-inset-bottom), 12px)",paddingLeft:"max(env(safe-area-inset-left), 10px)",paddingRight:"max(env(safe-area-inset-right), 10px)"}}>
+      {cams.length>1&&<div style={{display:"flex",gap:6,justifyContent:"center",marginBottom:8}}>{cams.map(cm=><button key={cm.id} onClick={()=>switchTo(cm)} style={vfChip(lens===cm.lens)}>{vfLensLabel[cm.lens]||"cam"}</button>)}</div>}
+      <div style={{display:"flex",gap:6,justifyContent:"flex-start",overflowX:"auto",marginBottom:8,paddingBottom:2}}>{VF_RATIOS.map(rt=><button key={rt.k} onClick={()=>setRatio(rt.k)} style={vfChip(ratio===rt.k)}>{rt.k==="1.33"?"Open Gate":rt.k}</button>)}</div>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+        <button onClick={()=>stepFocal(-1)} style={vfRound()} title="Wider"><Minus size={18}/></button>
+        <div style={{flex:1,display:"flex",gap:5,overflowX:"auto",padding:"2px",alignItems:"center"}}>
+          {focals.map(f=><button key={f} onClick={()=>setFocal(f)} style={{flexShrink:0,minWidth:42,padding:"7px 8px",borderRadius:8,border:`1px solid ${focal===f?"#ffd24d":"#333"}`,background:focal===f?"#ffd24d":"#161616",color:focal===f?"#000":"#ccc",fontFamily:MONO,fontSize:13,fontWeight:700,cursor:"pointer"}}>{f}</button>)}
+        </div>
+        <button onClick={()=>stepFocal(1)} style={vfRound()} title="Tighter"><Plus size={18}/></button>
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",position:"relative",height:64}}>
+        <div style={{position:"absolute",left:8,fontFamily:MONO,fontSize:13,color:"#bbb"}}>{focal}mm<span style={{color:"#666"}}> · {vfHfov(focal).toFixed(0)}°</span></div>
+        <button onClick={capture} disabled={busy} title="Shoot" style={{width:62,height:62,borderRadius:"50%",border:"4px solid #fff",background:"transparent",cursor:busy?"default":"pointer",display:"grid",placeItems:"center",opacity:busy?0.5:1}}><div style={{width:48,height:48,borderRadius:"50%",background:"#fff"}}/></button>
+        <div style={{position:"absolute",right:8,fontFamily:UI,fontSize:12,color:"#888"}}>{saved>0?`${saved} saved`:""}</div>
+      </div>
+    </div>}
   </div>;
 }
 
@@ -1223,7 +1387,7 @@ function PdfViewer({open,slot,start,title,onClose}){
   const te=e=>{if(touch.current==null||zoom)return;const dx=e.changedTouches[0].clientX-touch.current;touch.current=null;if(Math.abs(dx)>45)go(dx<0?1:-1);};
   const nav={width:48,height:48,borderRadius:"50%",border:"none",background:"#0009",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"};
   return <div style={{position:"fixed",inset:0,background:"#0b0b0d",zIndex:96,display:"flex",flexDirection:"column"}}>
-    <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,paddingTop:"max(env(safe-area-inset-top), 10px)",paddingBottom:10,paddingLeft:"max(env(safe-area-inset-left), 14px)",paddingRight:"max(env(safe-area-inset-right), 14px)",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
       <FileText size={16} color={c.accent}/>
       <div style={{fontFamily:UI,fontWeight:700,fontSize:14,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title||docs[slot]?.name||DOC_LABEL[slot]}</div>
       {N>0&&<div style={{fontFamily:MONO,fontSize:12,color:c.t2,flexShrink:0}}>{n} / {N}</div>}
@@ -1305,7 +1469,7 @@ function ScriptFull({scene,neighbors,goScene,onClose}){
   useEffect(()=>{const h=e=>{const n=navRef.current;if(e.key==="Escape")n.onClose&&n.onClose();else if((e.key==="ArrowRight"||e.key==="ArrowDown")&&n.next&&n.go){e.preventDefault();n.go(n.next);}else if((e.key==="ArrowLeft"||e.key==="ArrowUp")&&n.prev&&n.go){e.preventDefault();n.go(n.prev);}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
   const go=d=>{const t=d<0?neighbors?.prev:neighbors?.next;if(t&&goScene)goScene(t);};
   return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:97,display:"flex",flexDirection:"column"}}>
-    <div style={{display:"flex",alignItems:"center",gap:9,padding:"12px 16px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
+    <div style={{display:"flex",alignItems:"center",gap:9,paddingTop:"max(env(safe-area-inset-top), 12px)",paddingBottom:12,paddingLeft:"max(env(safe-area-inset-left), 16px)",paddingRight:"max(env(safe-area-inset-right), 16px)",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
       <span style={{fontFamily:MONO,fontSize:18,fontWeight:700,color:c.accent}}>{scene.number}</span>
       {scene.slug&&<Tag label={scene.slug} color={slugColor(scene.slug)}/>}
       {scene.dayNight&&<Tag label={scene.dayNight} color={dnColor(scene.dayNight)}/>}
@@ -1379,7 +1543,7 @@ function PanelShell({title,icon,action,children,wide}){
     <div style={{padding:14,overflowY:wide?"auto":"visible",flex:wide?1:"none",minHeight:0}}>{children}</div>
   </div>;
 }
-function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk,openLightbox,addGear,goScene,neighbors,openInfo,onToast,onSendRef,openPdf}){
+function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk,openLightbox,addGear,goScene,neighbors,openInfo,onToast,onSendRef,openPdf,openVf,addCapturedRef}){
   const [bump,setBump]=useState(0),[drag,setDrag]=useState(false),[pickBg,setPickBg]=useState(false),[sendImg,setSendImg]=useState(null),[scriptFull,setScriptFull]=useState(false);
   const fileRef=useRef(null),camRef=useRef(null);
   const loc=locations.find(l=>l.id===scene.locationId);
@@ -1448,7 +1612,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
   </PanelShell>;
 
   const Reference=<PanelShell wide={wide} title={`Reference${scene.refs.length?` · ${scene.refs.length}`:""}`} icon={<ImageIcon size={14} color={c.accent}/>}
-    action={<div style={{display:"flex",gap:6}}><IconBtn icon={Camera} size={17} onClick={()=>camRef.current.click()} dim title="Camera"/><IconBtn icon={Upload} size={17} onClick={()=>fileRef.current.click()} dim title="Add images"/></div>}>
+    action={<div style={{display:"flex",gap:6}}>{openVf&&addCapturedRef&&<IconBtn icon={Aperture} size={17} onClick={()=>openVf({title:`Scene ${scene.number} reference`,onCapture:async url=>{const id=await putImage(url);addCapturedRef(id);}})} dim title="Director's viewfinder"/>}<IconBtn icon={Camera} size={17} onClick={()=>camRef.current.click()} dim title="Camera"/><IconBtn icon={Upload} size={17} onClick={()=>fileRef.current.click()} dim title="Add images"/></div>}>
     <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{addImages([...e.target.files]);e.target.value="";}}/>
     <input ref={camRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{addImages([...e.target.files]);e.target.value="";}}/>
     <div onPaste={e=>{const fs=[...e.clipboardData.files];if(fs.length)addImages(fs);}}
@@ -2085,8 +2249,9 @@ function LocationCard({loc,meta,tz,date,openLightbox,onOpen}){
   </div>;
 }
 /* Rich, read-first location page: flip-through photos, map links, sun, weather, travel, scenes. */
-function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,openLightbox}){
+function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,openLightbox,onAddFiles,openViewfinder}){
   const [pi,setPi]=useState(0);
+  const photoRef=useRef(null);
   const gallery=(loc.images&&loc.images.length?loc.images:(loc.imgId?[loc.imgId]:[]));
   const plans=loc.plans||[];
   const here=scenes.filter(s=>s.locationId===loc.id&&s.status!=="omitted").sort((a,b)=>cmpNum(a.number,b.number));
@@ -2100,10 +2265,13 @@ function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,open
   const navb=side=>({position:"absolute",[side]:10,top:"50%",transform:"translateY(-50%)",width:38,height:38,borderRadius:"50%",border:"none",background:"#0009",color:"#fff",cursor:"pointer",display:"grid",placeItems:"center"});
   const sect={borderTop:`1px solid ${c.line}`,paddingTop:14};
   return <div style={{position:"fixed",inset:0,background:c.bg1,zIndex:90,display:"flex",flexDirection:"column"}}>
-    <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,paddingTop:"max(env(safe-area-inset-top), 11px)",paddingBottom:11,paddingLeft:"max(env(safe-area-inset-left), 14px)",paddingRight:"max(env(safe-area-inset-right), 14px)",borderBottom:`1px solid ${c.line}`,background:c.bg1,flexShrink:0}}>
       <IconBtn icon={ChevronLeft} onClick={onClose} title="Back"/>
       <MapPin size={16} color={c.accent}/>
       <div style={{fontFamily:UI,fontWeight:700,fontSize:16,color:c.t0,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
+      {openViewfinder&&<IconBtn icon={Aperture} onClick={openViewfinder} title="Director's viewfinder"/>}
+      {onAddFiles&&<IconBtn icon={Camera} onClick={()=>photoRef.current&&photoRef.current.click()} title="Add photos"/>}
+      <input ref={photoRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{const fs=[...e.target.files];e.target.value="";if(fs.length&&onAddFiles)onAddFiles(fs);}}/>
       <Btn kind="ghost" size={12} onClick={onEdit}><Settings size={14}/>Edit</Btn>
     </div>
     <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
@@ -2149,7 +2317,7 @@ function LocationDetail({loc,scenes,meta,tz,date,onClose,onEdit,onOpenScene,open
     </div>
   </div>;
 }
-function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFocused}){
+function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFocused,openVf}){
   const [ed,setEd]=useState(null);
   const [detailId,setDetail]=useState(null);
   const [dropId,setDropId]=useState("");
@@ -2161,6 +2329,7 @@ function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFo
   const save=l=>{const m={...l,_mt:Date.now()};setProject(p=>({...p,locations:m.id?p.locations.map(x=>x.id===m.id?m:x):[...p.locations,{...m,id:uid(),images:m.images||[],plans:m.plans||[]}]}));};
   const del=id=>setProject(p=>({...p,locations:p.locations.filter(x=>x.id!==id),scenes:p.scenes.map(s=>s.locationId===id?{...s,locationId:""}:s)}));
   const addImagesToLoc=async(locId,files)=>{const ids=[];let gps=null;for(const f of [...files]){if(!f.type.startsWith("image/"))continue;if(!gps){try{gps=await readExifGPS(f);}catch{}}try{ids.push(await putImage(await downscale(f)));}catch{}}if(!ids.length&&!gps)return;setProject(p=>({...p,locations:p.locations.map(l=>{if(l.id!==locId)return l;const next={...l,images:[...(l.images||[]),...ids],imgId:l.imgId||ids[0]||"",_mt:Date.now()};if(gps&&!String(l.lat||"").trim()&&!String(l.lng||"").trim()){next.lat=gps.lat.toFixed(6);next.lng=gps.lng.toFixed(6);}return next;})}));onToast&&onToast(ids.length?`${ids.length} photo${ids.length>1?"s":""} added to location`:"Location GPS set from photo");};
+  const addCapturedToLoc=async(locId,url)=>{const id=await putImage(url);setProject(p=>({...p,locations:p.locations.map(l=>l.id===locId?{...l,images:[...(l.images||[]),id],imgId:l.imgId||id,_mt:Date.now()}:l)}));onToast&&onToast("Photo saved to location");};
   return <div onDragOver={e=>{if([...(e.dataTransfer?.types||[])].includes("Files")){e.preventDefault();}}} onDrop={e=>{if([...(e.dataTransfer?.types||[])].includes("Files"))e.preventDefault();}}>
     <div style={{display:"flex",justifyContent:"flex-end",marginBottom:13}}><Btn kind="primary" size={12} onClick={()=>setEd({})}><Plus size={16}/>Location</Btn></div>
     {project.locations.length===0?<Empty icon={MapPin} title="No locations yet" body="Add the places you're shooting. Each gets sun direction, weather, travel time from base, a photo gallery, floor plans, and the scenes shot there." action={<Btn kind="primary" onClick={()=>setEd({})}><Plus size={16}/>Add location</Btn>}/>:
@@ -2190,7 +2359,7 @@ function Locations({project,setProject,onOpen,openLightbox,onToast,focusLoc,onFo
           </div>;})}
       </div>}
     <LocationEditor open={!!ed} init={ed} tz={project.meta.tz} date={ed&&ed.id?(nextDateForLoc(project.scenes,ed.id)||todayISO()):todayISO()} onClose={()=>setEd(null)} onSave={save} onDelete={del}/>
-    {detail&&<LocationDetail loc={detail} scenes={project.scenes} meta={project.meta} tz={project.meta.tz} date={nextDateForLoc(project.scenes,detail.id)||todayISO()} openLightbox={openLightbox} onOpenScene={n=>{setDetail(null);onOpen&&onOpen(n);}} onEdit={()=>{const d=detail;setDetail(null);setEd(d);}} onClose={()=>setDetail(null)}/>}
+    {detail&&<LocationDetail loc={detail} scenes={project.scenes} meta={project.meta} tz={project.meta.tz} date={nextDateForLoc(project.scenes,detail.id)||todayISO()} openLightbox={openLightbox} onOpenScene={n=>{setDetail(null);onOpen&&onOpen(n);}} onEdit={()=>{const d=detail;setDetail(null);setEd(d);}} onClose={()=>setDetail(null)} onAddFiles={files=>addImagesToLoc(detail.id,files)} openViewfinder={openVf?()=>openVf({title:`${detail.name||"Location"} photos`,onCapture:url=>addCapturedToLoc(detail.id,url)}):null}/>}
   </div>;
 }
 
@@ -2966,6 +3135,7 @@ export default function App(){
   const [activeScene,setActiveScene]=useState(null);
   const [lens,setLens]=useState("story");
   const [ink,setInk]=useState(null);
+  const [vf,setVf]=useState(null);
   const [light,setLight]=useState(null);
   const [toast,setToast]=useState(null);
   const [tb,setTb]=useState(0);
@@ -3106,6 +3276,7 @@ export default function App(){
 
   const toastFn=useCallback((msg,action)=>setToast({msg,action,id:uid()}),[]);
   const patchScene=useCallback((number,patch)=>setProject(p=>({...p,scenes:p.scenes.map(s=>s.number===number?{...s,...patch,_mt:Date.now()}:s)})),[]);
+  const addSceneRefs=useCallback((number,ids)=>setProject(p=>({...p,scenes:p.scenes.map(s=>s.number===number?{...s,refs:[...s.refs,...ids],_mt:Date.now()}:s)})),[]);// functional append so multiple viewfinder snaps don't clobber earlier ones
   const tagGear=useCallback((number,name,dept)=>setProject(p=>{let g=p.gear.find(x=>x.name.toLowerCase()===name.toLowerCase()&&x.dept===dept),gear=p.gear;if(!g){g={id:uid(),name,dept};gear=[...p.gear,g];}return {...p,gear,scenes:p.scenes.map(s=>s.number===number?(s.gearTags.includes(g.id)?s:{...s,gearTags:[...s.gearTags,g.id]}):s)};}),[]);
   const openLightbox=useCallback((items,i=0)=>setLight({items:(Array.isArray(items)?items:[items]).filter(Boolean),i}),[]);
   const sendRefBetween=useCallback((fromN,imgId,toN,mode)=>setProject(p=>({...p,scenes:p.scenes.map(s=>{
@@ -3166,7 +3337,7 @@ export default function App(){
   ):null;
 
   const TopBar=(
-    <div data-noprint style={{display:"flex",alignItems:"center",gap:10,padding:wide?"14px 22px":"11px 14px",borderBottom:`1px solid ${c.line}`,background:c.bg0,position:"sticky",top:0,zIndex:40}}>
+    <div data-noprint style={{display:"flex",alignItems:"center",gap:10,paddingTop:`max(env(safe-area-inset-top), ${wide?14:11}px)`,paddingBottom:`${wide?14:11}px`,paddingLeft:`max(env(safe-area-inset-left), ${wide?22:14}px)`,paddingRight:`max(env(safe-area-inset-right), ${wide?22:14}px)`,borderBottom:`1px solid ${c.line}`,background:c.bg0,position:"sticky",top:0,zIndex:40}}>
       {!wide&&<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:24,height:24,borderRadius:6,background:c.accent,display:"grid",placeItems:"center"}}><Film size={14} color="#17120a"/></div></div>}
       <div style={{display:"flex",gap:2}}>
         <IconBtn icon={ArrowLeft} onClick={goBack} dim title="Back to last screen" style={{opacity:canBack?1:0.3,width:wide?40:34}}/>
@@ -3208,16 +3379,16 @@ export default function App(){
     {Nav}
     <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",minHeight:"100vh"}}>
       {TopBar}
-      <div style={{flex:1,padding:wide?"20px 22px":"15px 13px",paddingBottom:wide?40:90,overflowY:"auto",...(view==="scene"&&wide?{display:"flex",flexDirection:"column"}:{})}}>
+      <div style={{flex:1,paddingTop:wide?20:15,paddingBottom:wide?40:"calc(90px + env(safe-area-inset-bottom))",paddingLeft:`max(env(safe-area-inset-left), ${wide?22:13}px)`,paddingRight:`max(env(safe-area-inset-right), ${wide?22:13}px)`,overflowY:"auto",...(view==="scene"&&wide?{display:"flex",flexDirection:"column"}:{})}}>
         {view==="home"&&<Dashboard project={project} onOpen={openScene} onNav={setView}/>}
-        {view==="scene"&&curScene&&<SceneView scene={curScene} scenes={project.scenes} meta={project.meta} locations={project.locations} gearList={project.gear} wide={wide} patchScene={patch=>patchScene(curScene.number,patch)} openInk={setInk} openLightbox={openLightbox} addGear={(name,dept)=>tagGear(curScene.number,name,dept)} goScene={openScene} neighbors={neighbors} openInfo={()=>setInfo(curScene)} onToast={toastFn} onSendRef={sendRefBetween} openPdf={openPdf}/>}
+        {view==="scene"&&curScene&&<SceneView scene={curScene} scenes={project.scenes} meta={project.meta} locations={project.locations} gearList={project.gear} wide={wide} patchScene={patch=>patchScene(curScene.number,patch)} openInk={setInk} openLightbox={openLightbox} addGear={(name,dept)=>tagGear(curScene.number,name,dept)} goScene={openScene} neighbors={neighbors} openInfo={()=>setInfo(curScene)} onToast={toastFn} onSendRef={sendRefBetween} openPdf={openPdf} openVf={setVf} addCapturedRef={id=>addSceneRefs(curScene.number,[id])}/>}
         {view==="scene"&&!curScene&&<Empty icon={Film} title="Scene not found" body="It may have been cut. Open the Scenes list." action={<Btn kind="primary" onClick={()=>setView("scenes")}>Scenes</Btn>}/>}
         {view==="scenes"&&<><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}><Btn kind="ghost" size={12} onClick={()=>setInfo({__new:true,status:"todo"})}><Plus size={15}/>Add scene</Btn></div><Library project={project} lens={lens} onOpen={openScene}/></>}
         {view==="look"&&<LookBoard project={project} setProject={setProject} openLightbox={openLightbox} onToast={toastFn}/>}
         {view==="docs"&&<Documents openPdf={openPdf} onToast={toastFn}/>}
         {view==="days"&&<Days project={project} onOpen={openScene}/>}
         {view==="capture"&&<Capture project={project} setProject={setProject} onFiled={()=>{}} onToast={toastFn}/>}
-        {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn} focusLoc={focusLoc} onFocused={()=>setFocusLoc(null)}/>}
+        {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn} focusLoc={focusLoc} onFocused={()=>setFocusLoc(null)} openVf={setVf}/>}
         {view==="crew"&&<Crew project={project} setProject={setProject}/>}
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
         {view==="contacts"&&<Crew project={project} setProject={setProject}/>}
@@ -3235,11 +3406,11 @@ export default function App(){
       </div>
     </div>
 
-    {!wide&&<div data-noprint style={{position:"fixed",left:0,right:0,bottom:0,zIndex:50,background:c.panel,borderTop:`1px solid ${c.line}`,display:"flex",alignItems:"center",justifyContent:"space-around",padding:"7px 6px 9px"}}>
+    {!wide&&<div data-noprint style={{position:"fixed",left:0,right:0,bottom:0,zIndex:50,background:c.panel,borderTop:`1px solid ${c.line}`,display:"flex",alignItems:"center",justifyContent:"space-around",paddingTop:7,paddingLeft:"max(env(safe-area-inset-left), 6px)",paddingRight:"max(env(safe-area-inset-right), 6px)",paddingBottom:"max(env(safe-area-inset-bottom), 9px)"}}>
       {MOBILE_NAV.map(k=>{const n=NAV.find(x=>x.k===k);const on=view===k||(k==="scenes"&&view==="scene");return <button key={k} onClick={()=>setView(k)} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3,background:"none",border:"none",color:on?c.accent:c.t2,cursor:"pointer",flex:1}}><n.icon size={21}/><span style={{fontFamily:UI,fontSize:9.5,fontWeight:600}}>{n.label}</span></button>;})}
       <button onClick={()=>setMore(true)} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3,background:"none",border:"none",color:c.t2,cursor:"pointer",flex:1}}><ChevronDown size={21} style={{transform:"rotate(180deg)"}}/><span style={{fontFamily:UI,fontSize:9.5,fontWeight:600}}>More</span></button>
     </div>}
-    {more&&!wide&&<div data-noprint onClick={()=>setMore(false)} style={{position:"fixed",inset:0,background:c.scrim,zIndex:70,display:"flex",alignItems:"flex-end"}}><div onClick={e=>e.stopPropagation()} style={{background:c.bg1,borderTopLeftRadius:18,borderTopRightRadius:18,width:"100%",padding:"10px 12px 26px",borderTop:`1px solid ${c.line2}`}}>
+    {more&&!wide&&<div data-noprint onClick={()=>setMore(false)} style={{position:"fixed",inset:0,background:c.scrim,zIndex:70,display:"flex",alignItems:"flex-end"}}><div onClick={e=>e.stopPropagation()} style={{background:c.bg1,borderTopLeftRadius:18,borderTopRightRadius:18,width:"100%",paddingTop:10,paddingLeft:12,paddingRight:12,paddingBottom:"calc(26px + env(safe-area-inset-bottom))",borderTop:`1px solid ${c.line2}`}}>
       <div style={{width:38,height:4,borderRadius:2,background:c.line2,margin:"6px auto 14px"}}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>{NAV.filter(n=>!MOBILE_NAV.includes(n.k)).map(n=><button key={n.k} onClick={()=>{setView(n.k);setMore(false);}} style={{display:"flex",alignItems:"center",gap:11,padding:"14px 13px",borderRadius:11,border:`1px solid ${c.line}`,background:view===n.k?c.accentSoft:c.bg2,color:view===n.k?c.accent:c.t0,cursor:"pointer",fontFamily:UI,fontSize:14,fontWeight:600}}><n.icon size={19}/>{n.label}</button>)}</div>
       <button onClick={()=>{const t=(project.meta.theme==="light")?"dark":"light";setProject(p=>({...p,meta:{...p.meta,theme:t}}));themeChange(t);}} style={{marginTop:9,width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"12px",borderRadius:11,border:`1px solid ${c.line}`,background:c.bg2,color:c.t1,cursor:"pointer",fontFamily:UI,fontSize:13.5}}>{c.bg0===DARK.bg0?<SunMedium size={17}/>:<MoonStar size={17}/>}Switch theme</button>
@@ -3247,6 +3418,7 @@ export default function App(){
 
     <QuickJump open={jump} scenes={project.scenes} onClose={()=>setJump(false)} onOpen={openScene}/>
     {ink&&<InkCanvas title={ink.title} bgUrl={ink.bgUrl} initial={ink.initial} draftKey={ink.draftKey} onClose={()=>setInk(null)} onSave={d=>{ink.onSave&&ink.onSave(d);}}/>}
+    {vf&&<Viewfinder title={vf.title} onCapture={vf.onCapture} onClose={()=>setVf(null)}/>}
     <Lightbox state={light} onClose={()=>setLight(null)}/>
     <PdfViewer open={!!pdfv} slot={pdfv?.slot} start={pdfv?.start} title={pdfv?.title} onClose={()=>setPdfv(null)}/>
     <SceneInfo open={!!info} init={info} locations={project.locations} onClose={()=>setInfo(null)} onSave={saveInfo} onDelete={delScene}/>
