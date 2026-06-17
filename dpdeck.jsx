@@ -1805,6 +1805,42 @@ function Days({project,onOpen}){
     </>}
   </div>;
 }
+// Full multi-day daily forecast for one lat/lng (Open-Meteo, keyless), cached per location.
+const fcCache=new Map();
+function useForecast(lat,lng){
+  const [st,setSt]=useState({s:"idle"});
+  useEffect(()=>{let on=true;if(lat==null||lng==null||lat===""||lng===""){setSt({s:"idle"});return;}
+    const key=`${(+lat).toFixed(3)},${(+lng).toFixed(3)}`;
+    if(fcCache.has(key)){setSt(fcCache.get(key));return;}
+    setSt({s:"load"});
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=14`).then(r=>r.json()).then(d=>{if(!on)return;const t=d?.daily?.time||[];const days=t.map((date,i)=>({date,code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]}));const r={s:"ok",days};fcCache.set(key,r);setSt(r);}).catch(()=>{if(on)setSt({s:"err"});});
+    return()=>{on=false;};},[lat,lng]);
+  return st;
+}
+// WEEK AHEAD — the next 7 days of weather laid over the schedule, so each day reads at a glance:
+// weather + (if shooting) the day number, scene count, and location.
+function WeekAhead({project,onOpen}){
+  const meta=project.meta||{};
+  const ti=todayISO();
+  const byDate=useMemo(()=>{const m=new Map();const add=(date,day,num)=>{if(!date)return;let e=m.get(date);if(!e){e={day,scenes:[]};m.set(date,e);}if(!e.scenes.includes(num))e.scenes.push(num);};if((project.days||[]).length){for(const d of project.days)for(const n of (d.scenes||[]))add(d.date,d.day,n);}else for(const s of project.scenes){if(s.status==="omitted"||!s.shootDate)continue;add(s.shootDate,s.shootDay,s.number);}return m;},[project.days,project.scenes]);
+  const dates=useMemo(()=>{const out=[];const d=new Date(ti+"T12:00:00");for(let i=0;i<7;i++){out.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`);d.setDate(d.getDate()+1);}return out;},[ti]);
+  const locOf=dt=>{const e=byDate.get(dt);if(!e)return null;for(const n of e.scenes){const s=project.scenes.find(x=>numKey(x.number)===numKey(n));const l=s&&(project.locations||[]).find(L=>L.id===s.locationId);if(l&&l.lat)return l;}return null;};
+  const fcLoc=useMemo(()=>{for(const dt of dates){const l=locOf(dt);if(l)return l;}const g=(project.locations||[]).find(l=>l.lat&&l.lng);if(g)return g;if(meta.baseLat)return {name:meta.baseName||"Base",lat:meta.baseLat,lng:meta.baseLng};return null;},[dates,project.locations,project.scenes,project.days]);
+  const fc=useForecast(fcLoc?.lat,fcLoc?.lng);
+  const wx=useMemo(()=>{const m=new Map();if(fc.s==="ok")for(const x of fc.days)m.set(x.date,x);return m;},[fc]);
+  if(!fcLoc)return null;
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:8,flexWrap:"wrap"}}><Label>Week ahead</Label><span style={{fontFamily:UI,fontSize:11,color:c.t2}}>forecast near {fcLoc.name}</span></div>
+    <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:3}}>
+      {dates.map(dt=>{const w=wx.get(dt);const sh=byDate.get(dt);const today=dt===ti;const dd=new Date(dt+"T12:00");const Icon=w?wxMeta(w.code).Icon:null;
+        return <div key={dt} style={{flexShrink:0,width:112,background:today?c.accentSoft:c.bg1,border:`1px solid ${today?c.accent:c.line}`,borderRadius:11,padding:"9px 10px",display:"flex",flexDirection:"column",gap:6}}>
+          <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}><span style={{fontFamily:UI,fontSize:11.5,fontWeight:700,color:today?c.accent:c.t1}}>{today?"Today":dd.toLocaleDateString(undefined,{weekday:"short"})}</span><span style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{dd.toLocaleDateString(undefined,{month:"short",day:"numeric"})}</span></div>
+          <div style={{display:"flex",alignItems:"center",gap:7,minHeight:30}}>{Icon?<><Icon size={26} color={c.accent} strokeWidth={1.5}/><div><div style={{fontFamily:MONO,fontSize:12.5,color:c.t0}}>{w.hi!=null?`${Math.round(w.hi)}°`:"--"}<span style={{color:c.t2}}> / {w.lo!=null?`${Math.round(w.lo)}°`:"--"}</span></div><div style={{fontFamily:MONO,fontSize:10,color:w.pr>=50?c.day:c.t2}}>{w.pr!=null?`${w.pr}%`:""}</div></div></>:<span style={{fontFamily:UI,fontSize:11,color:c.t2}}>{fc.s==="load"?"…":"beyond forecast"}</span>}</div>
+          {sh?<button onClick={()=>onOpen&&onOpen(sh.scenes[0])} title={`Day ${sh.day}`} style={{fontFamily:UI,fontSize:10.5,fontWeight:700,color:c.accent,background:c.accentSoft,border:`1px solid ${c.accent}55`,borderRadius:6,padding:"3px 6px",cursor:"pointer",textAlign:"left"}}>Day {sh.day} · {sh.scenes.length} sc</button>:<span style={{fontFamily:UI,fontSize:10.5,color:c.t2,padding:"3px 0"}}>no shoot</span>}
+        </div>;})}
+    </div>
+  </div>;
+}
 // HOME — a prep-and-shoot dashboard: at-a-glance status, the day in front of you with the light,
 // prep readiness, and the locations/look you live in. Designed to be the first thing worth opening.
 function Dashboard({project,onOpen,onNav}){
@@ -1817,7 +1853,7 @@ function Dashboard({project,onOpen,onNav}){
   const datedDays=dayList.filter(d=>d.date).sort((a,b)=>a.date<b.date?-1:1);
   const today=dayList.find(d=>d.date===ti)||null;
   const nextDay=today||datedDays.find(d=>d.date>=ti)||null;
-  const upcoming=datedDays.filter(d=>d.date>ti).slice(0,3);
+  const nextDay2=datedDays.find(d=>d.date>(nextDay?nextDay.date:ti))||null;  // the day after the one in front of you = the "next day" sides glance
   const shootStart=datedDays[0]?.date||"";
   const shootEnd=datedDays[datedDays.length-1]?.date||"";
   const daysToStart=shootStart?Math.round((new Date(shootStart+"T12:00")-new Date(ti+"T12:00"))/864e5):null;
@@ -1891,14 +1927,12 @@ function Dashboard({project,onOpen,onNav}){
       <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>{sc.map(x=><div key={x.k} style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:9,height:9,borderRadius:2,background:x.color}}/><span style={{fontFamily:UI,fontSize:11.5,color:c.t1}}>{x.label}</span><span style={{fontFamily:MONO,fontSize:11.5,color:c.t2}}>{x.n}</span></div>)}</div>
     </div>}
 
-    {nextDay?<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>{today?"Today":"Next shoot day"}</Label><button onClick={()=>onNav("days")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Full schedule →</button></div><DayHero d={nextDay} big={!!today}/></div>
+    {nextDay?<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>{today?"Today's sides":"Next shoot day"}</Label><button onClick={()=>onNav("days")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Full schedule →</button></div><DayHero d={nextDay} big={!!today}/></div>
       :<div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:14,padding:"15px 16px",fontFamily:UI,fontSize:13.5,color:c.t1}}>No shoot schedule loaded yet. Drop the schedule in Import, or hand Claude the call sheet.</div>}
 
-    {upcoming.length>0&&<div><Label style={{marginBottom:7}}>Then</Label><div style={{display:"flex",flexDirection:"column",gap:7}}>{upcoming.map(d=>{const loc=dayLocation(d.scenes,locs);return <button key={d.day} onClick={()=>onOpen(d.scenes[0]?.number)} style={{display:"flex",alignItems:"center",gap:11,background:c.bg1,border:`1px solid ${c.line}`,borderRadius:11,padding:"9px 13px",cursor:"pointer",textAlign:"left"}}>
-      <span style={{fontFamily:MONO,fontSize:15,fontWeight:700,color:c.accent,minWidth:30}}>{d.day}</span>
-      <div style={{minWidth:78}}><div style={{fontFamily:UI,fontSize:12,color:c.t1}}>{fmtD(d.date)}</div><div style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{d.scenes.length} sc</div></div>
-      {loc&&<Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip>}<div style={{flex:1}}/><ChevronRight size={16} color={c.t2}/>
-    </button>;})}</div></div>}
+    {nextDay2&&<div><Label style={{marginBottom:7}}>{today?"Next day":"Then"}</Label><DayHero d={nextDay2}/></div>}
+
+    <WeekAhead project={project} onOpen={onOpen}/>
 
     {locBoard.length>0&&<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><Label>Locations up next</Label><button onClick={()=>onNav("locations")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>All {locs.length} →</button></div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10}}>{locBoard.map(({l,n,d})=>{const hero=l.imgId||(l.images&&l.images[0]);return <button key={l.id} onClick={()=>onOpen("__loc__"+l.id)} style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:11,overflow:"hidden",cursor:"pointer",textAlign:"left",padding:0}}>
