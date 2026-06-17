@@ -465,7 +465,7 @@ function mergeScene(base,ours,theirs){
   o.sketches=merge3List(base&&base.sketches,ours.sketches,theirs.sketches,x=>x);
   o.gearTags=merge3List(base&&base.gearTags,ours.gearTags,theirs.gearTags,x=>x);
   o.aiGear=merge3List(base&&base.aiGear,ours.aiGear,theirs.aiGear,x=>x.text);
-  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText"])
+  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay"])
     o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
   o._mt=Math.max(om,tm);
   return o;
@@ -474,7 +474,7 @@ function mergeLoc(base,ours,theirs){
   const om=mtOf(ours),tm=mtOf(theirs),b=base||{},o={...ours};
   o.images=merge3List(base&&base.images,ours.images,theirs.images,x=>x); // per-photo add/delete: concurrent adds both kept, deletes honored, no r2-vs-embedded dupes
   o.plans=merge3List(base&&base.plans,ours.plans,theirs.plans,x=>x);
-  for(const f of ["name","address","lat","lng","notes","imgId","status"])o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
+  for(const f of ["name","address","lat","lng","notes","imgId","status","radius"])o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
   o._mt=Math.max(om,tm);
   return o;
 }
@@ -485,7 +485,7 @@ function mergeProjects(base,ours,theirs){
   out.locations=merge3List(base.locations,ours.locations,theirs.locations,l=>l.id,mergeLoc);
   const depts=new Set([...Object.keys(ours.crew||{}),...Object.keys(theirs.crew||{}),...Object.keys(base.crew||{})]);
   out.crew={};for(const d of depts)out.crew[d]=merge3List((base.crew||{})[d],(ours.crew||{})[d],(theirs.crew||{})[d],m=>m.id||(m.name||"").trim().toLowerCase(),mergePerson(["name","role","phone","email","pron","dept"]));
-  out.contacts=merge3List(base.contacts,ours.contacts,theirs.contacts,c=>c.id||(c.name||"").trim().toLowerCase(),mergePerson(["name","role","address","lat","lng","phone","email"]));
+  out.contacts=merge3List(base.contacts,ours.contacts,theirs.contacts,c=>c.id||(c.name||"").trim().toLowerCase(),mergePerson(["name","role","dept","address","lat","lng","phone","email"]));
   out.gear=merge3List(base.gear,ours.gear,theirs.gear,g=>g.id||((g.name||"").toLowerCase()+"|"+g.dept));
   out.look=merge3List(base.look,ours.look,theirs.look,x=>x);
   out.inbox=merge3List(base.inbox,ours.inbox,theirs.inbox,x=>x.id||JSON.stringify(x));
@@ -510,7 +510,14 @@ function mergeDecks(baseProj,ours,theirs){                   // merge full backu
   for(const s of merged.scenes||[])for(const id of s.sketches||[])skIds.add(id);
   for(const id of skIds){const sk=pool["pb:sketch:"+id];if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId)&&!isR2Ref(sk.bgImgId))imgIds.add(sk.bgImgId);}}
   for(const id of imgIds){if(pool["pb:img:"+id]!==undefined)data["pb:img:"+id]=pool["pb:img:"+id];if(pool["pb:imgfull:"+id]!==undefined)data["pb:imgfull:"+id]=pool["pb:imgfull:"+id];}
-  for(const k of Object.keys(pool))if(k.startsWith("pb:scriptink:"))data[k]=pool[k];
+  // Script ink: per-PAGE union, not whole-object LWW. Two devices that marked different pages of the same
+  // scene both keep their pages; a page edited on both sides resolves by newer per-page _mt, else more strokes.
+  const inkKeys=new Set();for(const src of [ours.data,theirs.data])for(const k of Object.keys(src))if(k.startsWith("pb:scriptink:"))inkKeys.add(k);
+  for(const k of inkKeys){const o=ours.data[k],t=theirs.data[k];
+    if(o&&t){const m={...t,...o};
+      for(const pg of Object.keys(t)){if(o[pg]&&!jeq(o[pg],t[pg])){const om=(o[pg]||{})._mt||0,tm=(t[pg]||{})._mt||0,oc=((o[pg]||{}).strokes||[]).length,tc=((t[pg]||{}).strokes||[]).length;m[pg]=(tm>om||(tm===om&&tc>oc))?t[pg]:o[pg];}}
+      data[k]=m;}
+    else data[k]=o||t;}
   for(const slot of ["script","schedule"]){if(pool["pb:doc:"+slot]!==undefined){data["pb:doc:"+slot]=pool["pb:doc:"+slot];if(pool["pb:doc:"+slot+"name"]!==undefined)data["pb:doc:"+slot+"name"]=pool["pb:doc:"+slot+"name"];}}
   return {dpdeckBackup:1,ts:Math.max(ours.ts||0,theirs.ts||0)+1,data};
 }
@@ -547,6 +554,7 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
   await store.set("pb:synced_ts",pushDeck.ts);               // NOT pb:project_mtime: an edit made DURING this push keeps mtime>synced so it's pushed next cycle (not silently equalized)
   await store.set("pb:base_snapshot",pushDeck.data["pb:project"]);  // ancestor = EXACTLY what we pushed to the cloud (never a re-read of live pb:project, which a during-push edit can have advanced)
   try{await writeDailySnapshot(s,pushDeck.ts);}catch{}
+  try{await writeShadow(pushDeck.data["pb:project"]);}catch{}    // per-device clobber-proof safety copy (project only)
   return {len:s.length,merged,pushed:true};
 }
 async function pullDeckFromCloud(){
@@ -587,6 +595,33 @@ async function restoreSnapshot(tag){
   await store.set("pb:synced_ts",Date.now());await store.set("pb:project_mtime",Date.now());
   return true;
 }
+/* ---- REDUNDANCY: silent secondary save layers --------------------------------------------------
+   Two automatic fail-safes that run ALONGSIDE the primary IndexedDB store + cloud deck + daily snapshots,
+   so prep work (especially irreplaceable gear notes) is never lost to a single point of failure:
+   (1) localStorage MIRROR of the project only (no media). Survives an IndexedDB wipe/corruption; adopted on
+       load when it is newer than what IndexedDB holds.
+   (2) per-device cloud SHADOW (dpdeck/shadow/<device>.json, project only). Each device writes its OWN key,
+       never merged or overwritten by another device, so even a bad merge of the shared deck can't erase a
+       device's last-known-good prep. Recoverable from Settings. */
+const LS_MIRROR="pb:mirror";
+function mirrorLocal(project){try{if(typeof localStorage==="undefined"||!project)return;localStorage.setItem(LS_MIRROR,JSON.stringify({project,mtime:Date.now()}));}catch{}}
+function readMirror(){try{if(typeof localStorage==="undefined")return null;const t=localStorage.getItem(LS_MIRROR);return t?JSON.parse(t):null;}catch{return null;}}
+async function deviceId(){
+  let id=null;try{if(typeof localStorage!=="undefined")id=localStorage.getItem("pb:deviceid");}catch{}
+  if(!id)id=await store.get("pb:deviceid");
+  if(!id){id=uid()+uid();try{if(typeof localStorage!=="undefined")localStorage.setItem("pb:deviceid",id);}catch{}await store.set("pb:deviceid",id);}
+  return id;
+}
+const SHADOW_INDEX="dpdeck/shadow/_index.json";
+const shadowKey=id=>"dpdeck/shadow/"+id+".json";
+async function writeShadow(project){
+  if(!R2_KEY||!project)return;
+  const id=await deviceId(),label=((typeof navigator!=="undefined"&&navigator.platform)||"device");
+  await r2Write(shadowKey(id),JSON.stringify({device:id,label,ts:Date.now(),project}));   // project only, no media; per-device key = clobber-proof
+  try{const t=await r2ReadRaw(SHADOW_INDEX);const idx=t?(JSON.parse(t).devices||[]):[];const i=idx.findIndex(d=>d.id===id);const e={id,label,ts:Date.now()};if(i>=0)idx[i]=e;else idx.push(e);await r2Write(SHADOW_INDEX,JSON.stringify({devices:idx}));}catch{}
+}
+async function readShadowIndex(){try{const t=await r2ReadRaw(SHADOW_INDEX);return t?(JSON.parse(t).devices||[]):[];}catch{return [];}}
+async function readShadow(id){const t=await r2ReadRaw(shadowKey(id));return t?JSON.parse(t):null;}
 /* in-app AI: uses the user's OWN Anthropic key, stored locally (pb:aikey) on this device,
    called direct from the browser. No key in code, no server. Empty key = AI buttons stay off;
    the paste-JSON and Load Project paths never need it. */
@@ -897,12 +932,20 @@ function InkThumb({data,style}){
   },[data]);
   return <canvas ref={ref} style={{width:"100%",height:"100%",display:"block",...style}}/>;
 }
-function InkCanvas({initial,bgUrl,onClose,onSave,title}){
+function InkCanvas({initial,bgUrl,onClose,onSave,title,draftKey}){
   const wrap=useRef(null),cvRef=useRef(null),bgRef=useRef(null);
   const [strokes,setStrokes]=useState(initial?.strokes||[]);
   const [color,setColor]=useState(INK_COLORS[0]),[w,setW]=useState(3),[tool,setTool]=useState("pen");
   const [view,setView]=useState({s:1,tx:0,ty:0});
   const draw=useRef(null),drag=useRef(null),aspect=useRef(initial?.aspect||4/3);
+  const dkey=draftKey?("pb:inkdraft:"+draftKey):null,dsave=useRef(null);
+  // Recover strokes from a prior crash/close, but ONLY when the draft has MORE strokes than what we opened with
+  // — restores added work, never resurrects an erase or overrides a version that was already saved with Done.
+  useEffect(()=>{if(!dkey)return;let on=true;store.get(dkey).then(d=>{if(on&&d&&Array.isArray(d.strokes)&&d.strokes.length>(initial?.strokes?.length||0)){if(d.aspect)aspect.current=d.aspect;setStrokes(d.strokes);}});return()=>{on=false;};},[dkey]);
+  // Continuously autosave in-progress strokes to a scratch draft so nothing is lost if the editor is closed or
+  // the app is evicted before Done. Debounced while drawing; flushed immediately when the tab hides.
+  useEffect(()=>{if(!dkey)return;clearTimeout(dsave.current);dsave.current=setTimeout(()=>{store.set(dkey,{strokes,aspect:aspect.current,_mt:Date.now()}).catch(()=>{});},500);return()=>clearTimeout(dsave.current);},[strokes,dkey]);
+  useEffect(()=>{if(!dkey)return;const flush=()=>{if(document.visibilityState==="hidden"){clearTimeout(dsave.current);try{store.set(dkey,{strokes,aspect:aspect.current,_mt:Date.now()});}catch{}}};document.addEventListener("visibilitychange",flush);window.addEventListener("pagehide",flush);return()=>{document.removeEventListener("visibilitychange",flush);window.removeEventListener("pagehide",flush);};},[strokes,dkey]);
   useEffect(()=>{const u=bgUrl||initial?.bgUrl;if(u){const im=new Image();im.onload=()=>{bgRef.current=im;aspect.current=im.width/im.height;render();};im.src=u;}else{aspect.current=initial?.aspect||4/3;render();}},[bgUrl]);
   const box=()=>{const cv=cvRef.current;if(!cv)return{W:1,H:1,bw:1,bh:1,ox:0,oy:0};const dpr=Math.min(devicePixelRatio||1,2);const W=cv.width/dpr,H=cv.height/dpr;const ar=aspect.current;let bw=W*0.96,bh=bw/ar;if(bh>H*0.96){bh=H*0.96;bw=bh*ar;}return{W,H,bw,bh,ox:(W-bw)/2,oy:(H-bh)/2};};
   const n2s=(nx,ny)=>{const b=box();return{x:(b.ox+nx*b.bw)*view.s+view.tx,y:(b.oy+ny*b.bh)*view.s+view.ty};};
@@ -929,7 +972,7 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title}){
     if(drag.current?.er){erHit(np);return;}
     if(drag.current){setView(v=>({...v,tx:drag.current.otx+(sp.x-drag.current.sx),ty:drag.current.oty+(sp.y-drag.current.sy)}));}};
   const up=()=>{if(draw.current){const st=draw.current;draw.current=null;if(st.pts.length)setStrokes(s=>[...s,st]);else render();}drag.current=null;};
-  const save=()=>{onSave({strokes,aspect:aspect.current,bgUrl:bgUrl||initial?.bgUrl||null});onClose();};
+  const save=()=>{onSave({strokes,aspect:aspect.current,bgUrl:bgUrl||initial?.bgUrl||null});if(dkey)store.del(dkey).catch(()=>{});onClose();};
   return <div style={{position:"fixed",inset:0,background:c.bg0,zIndex:90,display:"flex",flexDirection:"column"}}>
     <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderBottom:`1px solid ${c.line}`,background:c.bg1}}>
       <IconBtn icon={X} onClick={onClose} size={18} dim title="Close"/>
@@ -1204,7 +1247,7 @@ function PdfViewer({open,slot,start,title,onClose}){
 async function loadSketch(id){const d=await store.get("pb:sketch:"+id);if(!d)return null;if(d.bgImgId&&!d.bgUrl)d.bgUrl=isImgUrl(d.bgImgId)?d.bgImgId:await store.get("pb:img:"+d.bgImgId);return d;}
 async function saveSketch(id,data){await store.set("pb:sketch:"+id,{strokes:data.strokes,aspect:data.aspect,bgImgId:data.bgImgId||null});}
 async function loadScriptInk(number){return (await store.get("pb:scriptink:"+number))||{};}
-async function saveScriptInk(number,page,d){const all=(await store.get("pb:scriptink:"+number))||{};all[page]={strokes:d.strokes,aspect:d.aspect};await store.set("pb:scriptink:"+number,all);}
+async function saveScriptInk(number,page,d){const all=(await store.get("pb:scriptink:"+number))||{};all[page]={strokes:d.strokes,aspect:d.aspect,_mt:Date.now()};await store.set("pb:scriptink:"+number,all);}
 
 function useWide(bp=980){const [w,setW]=useState(typeof window!=="undefined"?window.innerWidth:1200);useEffect(()=>{const f=()=>setW(window.innerWidth);addEventListener("resize",f);return()=>removeEventListener("resize",f);},[]);return w>=bp;}
 function useForm(init,open){const [f,setF]=useState(init||{});useEffect(()=>{setF(init||{});},[init,open]);return [f,(k,v)=>setF(p=>({...p,[k]:v})),setF];}
@@ -1356,9 +1399,10 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
     if(isImgUrl(url)){patchScene({refs:[...scene.refs,url]});onToast&&onToast("Reference added from link");}
     else onToast&&onToast("Couldn't read that drop. Save the image, then drag the file in.");
   };
-  const markPage=(n,ink,url,aspect)=>openInk({title:`Scene ${scene.number} · page ${n}`,bgUrl:url,initial:ink?{...ink,bgUrl:url}:{aspect},onSave:async d=>{await saveScriptInk(scene.number,n,d);setBump(b=>b+1);}});
-  const newSketch=async(bg)=>{const bgUrl=bg?(isImgUrl(bg)?bg:await store.get("pb:img:"+bg)):null;const id=uid();openInk({title:`Blocking · Scene ${scene.number}`,bgUrl,initial:bgUrl?{bgUrl}:{aspect:4/3},onSave:async d=>{await saveSketch(id,{...d,bgImgId:bg||null});patchScene({sketches:[...scene.sketches,id]});}});};
-  const editSketch=async id=>{const d=await loadSketch(id);openInk({title:`Blocking · Scene ${scene.number}`,bgUrl:d?.bgUrl||null,initial:d||{aspect:4/3},onSave:async nd=>{await saveSketch(id,{...nd,bgImgId:d?.bgImgId||null});setBump(b=>b+1);}});};
+  // patchScene({}) after a save bumps the scene's _mt so the deck push fires + the ink/sketch payload (re-read fresh by exportFullBackup) rides to the cloud. Without it an ink/sketch edit is stranded local-only.
+  const markPage=(n,ink,url,aspect)=>openInk({title:`Scene ${scene.number} · page ${n}`,bgUrl:url,draftKey:"si:"+scene.number+":"+n,initial:ink?{...ink,bgUrl:url}:{aspect},onSave:async d=>{await saveScriptInk(scene.number,n,d);setBump(b=>b+1);patchScene({});}});
+  const newSketch=async(bg)=>{const bgUrl=bg?(isImgUrl(bg)?bg:await store.get("pb:img:"+bg)):null;const id=uid();openInk({title:`Blocking · Scene ${scene.number}`,bgUrl,draftKey:"sk:"+id,initial:bgUrl?{bgUrl}:{aspect:4/3},onSave:async d=>{await saveSketch(id,{...d,bgImgId:bg||null});patchScene({sketches:[...scene.sketches,id]});}});};
+  const editSketch=async id=>{const d=await loadSketch(id);openInk({title:`Blocking · Scene ${scene.number}`,bgUrl:d?.bgUrl||null,draftKey:"sk:"+id,initial:d||{aspect:4/3},onSave:async nd=>{await saveSketch(id,{...nd,bgImgId:d?.bgImgId||null});setBump(b=>b+1);patchScene({});}});};
   const startSketch=()=>{(plans.length||scene.refs.length)?setPickBg(true):newSketch(null);};
 
   const InfoStrip=(
@@ -2606,8 +2650,10 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
   const [aikey,setAikey]=useState("");
   const [r2key,setR2k]=useState(""),[syncing,setSyncing]=useState("");
   const [snaps,setSnaps]=useState(null),[restoring,setRestoring]=useState(""),[lastBk,setLastBk]=useState(0);
+  const [shadows,setShadows]=useState(null),[myDev,setMyDev]=useState("");
   const loadSnaps=()=>{if(!R2_KEY){setSnaps([]);return;}setSnaps(null);readSnapshotIndex().then(idx=>setSnaps(idx.slice().reverse())).catch(()=>setSnaps([]));};
-  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));store.get("pb:r2key").then(k=>setR2k(k||""));store.get("pb:lastbackup").then(v=>setLastBk(v||0));loadSnaps();},[]);
+  const loadShadows=()=>{if(!R2_KEY){setShadows([]);return;}setShadows(null);readShadowIndex().then(d=>setShadows(d.slice().sort((a,b)=>(b.ts||0)-(a.ts||0)))).catch(()=>setShadows([]));};
+  useEffect(()=>{store.get("pb:aikey").then(k=>setAikey(k||""));store.get("pb:r2key").then(k=>setR2k(k||""));store.get("pb:lastbackup").then(v=>setLastBk(v||0));deviceId().then(setMyDev).catch(()=>{});loadSnaps();loadShadows();},[]);
   const useHere=async()=>{try{const {lat,lng}=await whereAmI();setProject(p=>({...p,meta:{...p.meta,baseLat:lat.toFixed(6),baseLng:lng.toFixed(6)}}));onToast("Base set to current location");}catch{onToast("Couldn't get location");}};
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     <Card title="Film" icon={Film}>
@@ -2656,6 +2702,20 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
         <div style={{marginTop:10}}><Btn kind="ghost" size={12} onClick={loadSnaps}><RefreshCw size={14}/>Refresh</Btn></div>
       </>}
     </Card>
+    <Card title="Device safety copies (automatic)" icon={Cloud}>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>{R2_KEY?"Each device saves its own private copy of the prep data (scenes, schedule, gear, notes, crew, contacts — no photos) to your cloud under its own key, refreshed on every sync. Nothing one device typed can be wiped by another device or a bad merge. If a device's deck ever looks wrong, restore its copy here. This runs silently; you don't need to do anything.":"Turn on Cloud sync above and each device keeps its own clobber-proof safety copy here."}</div>
+      {R2_KEY&&<>
+        {shadows===null?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>Loading…</div>:
+         shadows.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>No copies yet — one is written the next time the deck syncs.</div>:
+         <div style={{display:"flex",flexDirection:"column",gap:7,maxHeight:240,overflowY:"auto"}}>
+           {shadows.map(s=><div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,padding:"8px 11px"}}>
+             <div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0}}>{(s.label||"Device")}{s.id===myDev?" · this device":""}</div><div style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{s.ts?new Date(s.ts).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):s.id.slice(0,8)}</div></div>
+             <Btn kind="ghost" size={12} disabled={!!restoring} onClick={async()=>{if(!window.confirm(`Restore prep data from "${s.label||"this device"}"${s.id===myDev?" (this device's last copy)":""}? It replaces the current scenes/gear/notes/schedule/crew (photos are kept as they are). A snapshot of the current deck is saved first, so this is reversible.`))return;setRestoring("sh:"+s.id);try{if(R2_KEY)await writeSnapshotNow("before-shadow-restore-"+Date.now(),"Before safety-copy restore "+todayISO());const sh=await readShadow(s.id);if(!sh||!sh.project)throw new Error("Copy not found.");await store.set("pb:project",sh.project);await store.set("pb:project_mtime",Date.now());mirrorLocal(sh.project);onToast("Restored prep from "+(s.label||"device")+". Reloading…");setTimeout(()=>location.reload(),900);}catch(e){onToast("Restore failed: "+(e.message||""));setRestoring("");}}}>{restoring==="sh:"+s.id?"Restoring…":"Restore"}</Btn>
+           </div>)}
+         </div>}
+        <div style={{marginTop:10}}><Btn kind="ghost" size={12} onClick={loadShadows}><RefreshCw size={14}/>Refresh</Btn></div>
+      </>}
+    </Card>
     <Card title="Data" icon={Settings}>
       <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:12}}>{HAS?"Your deck is saved locally (IndexedDB, persistent) and, with Cloud sync on, mirrored to your R2 cloud with daily snapshots above. A downloaded backup is an extra offline copy and the way to move the deck to a device that isn't on sync.":"Heads up: persistent storage isn't available here, so this session won't be saved. Download a backup."}</div>
       <div style={{display:"flex",gap:9,flexWrap:"wrap",marginBottom:8}}>
@@ -2665,7 +2725,7 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
       </div>
       <div style={{fontFamily:MONO,fontSize:10.5,color:c.t2,marginBottom:14}}>{lastBk?`Last download backup: ${new Date(lastBk).toLocaleDateString()}`:"No download backup taken yet."}{R2_KEY?" · cloud snapshots: on":" · cloud snapshots: off"}</div>
       {!wipe?<Btn kind="danger" size={12} onClick={()=>setWipe(true)}><Trash2 size={15}/>Erase everything</Btn>:
-        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:scriptname","pb:doc:schedulename","pb:snap_day"])await store.del(k);location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
+        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:scriptname","pb:doc:schedulename","pb:snap_day"])await store.del(k);try{localStorage.removeItem(LS_MIRROR);}catch{}location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
     </Card>
     <div style={{textAlign:"center",fontFamily:MONO,fontSize:10.5,color:c.t2,padding:"4px 0 12px"}}>DP DECK · prep + shoot · one film</div>
   </div>;
@@ -2952,14 +3012,24 @@ export default function App(){
     const keyed=!!R2_KEY;setHasKey(keyed);
     const localSynced0=(await store.get("pb:synced_ts"))||0,localMtime0=(await store.get("pb:project_mtime"))||0;
     const hasLocalEdits=localMtime0>localSynced0; // unsynced local work — a pull must NEVER clobber it
+    let pulled=false;
     // Auto-pull on open ONLY when this device has no unsynced edits; otherwise we would revert the user's work.
     if(keyed){try{
       setSync({state:"syncing",at:Date.now()});
       const meta=await remoteDeckMeta();
-      if(meta&&meta.ts&&meta.ts>localSynced0&&!hasLocalEdits){pulling.current=true;await pullDeckFromCloud();pulling.current=false;}
+      if(meta&&meta.ts&&meta.ts>localSynced0&&!hasLocalEdits){pulling.current=true;await pullDeckFromCloud();pulling.current=false;pulled=true;}
       setSync({state:"synced",at:Date.now()});
     }catch{pulling.current=false;setSync({state:"error",at:Date.now()});}}
     let p=normalizeProject(await store.get("pb:project"));
+    // REDUNDANCY: if IndexedDB was wiped/corrupted (came back empty) but the localStorage mirror still holds the
+    // deck, recover from it. Deliberately conservative — only fires when IDB has NO scenes, so it can never roll a
+    // good IDB deck (or a freshly-pulled cloud deck) backward. The mirror is cleared on a deliberate Erase.
+    try{const mir=readMirror();
+      if(!pulled&&!(p.scenes&&p.scenes.length)&&mir&&mir.project&&Array.isArray(mir.project.scenes)&&mir.project.scenes.length){
+        p=normalizeProject(mir.project);
+        await store.set("pb:project",mir.project);await store.set("pb:project_mtime",mir.mtime||Date.now());
+      }
+    }catch{}
     applyTheme(p.meta.theme);setProject(p);
     setView(p.scenes.length?"home":"import");
     restoreScriptPDF().then(()=>setTb(b=>b+1));
@@ -3016,17 +3086,21 @@ export default function App(){
     const startPoll=()=>{if(pollTimer)return;pollTimer=setInterval(tick,12000);};
     const stopPoll=()=>{if(pollTimer){clearInterval(pollTimer);pollTimer=null;}};
     const onFocus=()=>reconcile({pushLocal:true});
+    // Persist the latest in-memory project locally on EVERY close, key or no key (the cloud push stays key-gated).
+    // Without this a non-keyed device loses edits made within the 600ms persist debounce when the tab is closed;
+    // also writes the localStorage mirror so the work survives even an IndexedDB eviction.
+    const flushLocal=()=>{const pr=projectRef.current;if(!pr)return;clearTimeout(persistTimer.current);try{store.set("pb:project",pr);}catch{}mirrorLocal(pr);};
     const onVis=()=>{
       if(document.visibilityState==="visible"){reconcile({pushLocal:true});startPoll();}
-      else{stopPoll();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}}
+      else{stopPoll();flushLocal();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}}
     };
-    const onHide=()=>{stopPoll();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}};
+    const onHide=()=>{stopPoll();flushLocal();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}};
     window.addEventListener("focus",onFocus);document.addEventListener("visibilitychange",onVis);window.addEventListener("pagehide",onHide);
     if(typeof document==="undefined"||document.visibilityState==="visible")startPoll();
     return()=>{window.removeEventListener("focus",onFocus);document.removeEventListener("visibilitychange",onVis);window.removeEventListener("pagehide",onHide);stopPoll();};
   },[]);
 
-  useEffect(()=>{if(!loaded.current||!project||needReload.current)return;clearTimeout(persistTimer.current);persistTimer.current=setTimeout(()=>{store.set("pb:project",project);},600);return()=>clearTimeout(persistTimer.current);},[project]);
+  useEffect(()=>{if(!loaded.current||!project||needReload.current)return;clearTimeout(persistTimer.current);persistTimer.current=setTimeout(()=>{store.set("pb:project",project);mirrorLocal(project);},600);return()=>clearTimeout(persistTimer.current);},[project]);
 
   useEffect(()=>{const h=e=>{const tag=((e.target&&e.target.tagName)||"").toLowerCase();const typing=tag==="input"||tag==="textarea"||(e.target&&e.target.isContentEditable);if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setJump(j=>!j);}else if(e.key==="/"&&!typing){e.preventDefault();setJump(true);}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[]);
 
@@ -3072,7 +3146,7 @@ export default function App(){
   const curScene=project.scenes.find(s=>s.number===activeScene);
   let neighbors=null;
   if(curScene){const i=present.findIndex(s=>s.number===curScene.number);neighbors={prev:i>0?present[i-1].number:null,next:i>=0&&i<present.length-1?present[i+1].number:null};}
-  const saveInfo=f=>{const {__new,...d}=f;setProject(p=>{if(info.__new){if(!d.number)return p;return {...p,scenes:[...p.scenes,{...emptyScene(d.number,d),...d}]};}return {...p,scenes:p.scenes.map(s=>s.number===info.number?{...s,...d}:s)};});};
+  const saveInfo=f=>{const {__new,...d}=f;setProject(p=>{if(info.__new){if(!d.number)return p;return {...p,scenes:[...p.scenes,{...emptyScene(d.number,d),...d,_mt:Date.now()}]};}return {...p,scenes:p.scenes.map(s=>s.number===info.number?{...s,...d,_mt:Date.now()}:s)};});};
   const delScene=number=>{setProject(p=>({...p,scenes:p.scenes.filter(s=>s.number!==number)}));if(activeScene===number){setView("scenes");setActiveScene(null);}};
   const collapsed=!!project.meta.navCollapsed;
   const toggleNav=()=>setProject(p=>({...p,meta:{...p.meta,navCollapsed:!p.meta.navCollapsed}}));
@@ -3172,7 +3246,7 @@ export default function App(){
     </div></div>}
 
     <QuickJump open={jump} scenes={project.scenes} onClose={()=>setJump(false)} onOpen={openScene}/>
-    {ink&&<InkCanvas title={ink.title} bgUrl={ink.bgUrl} initial={ink.initial} onClose={()=>setInk(null)} onSave={d=>{ink.onSave&&ink.onSave(d);}}/>}
+    {ink&&<InkCanvas title={ink.title} bgUrl={ink.bgUrl} initial={ink.initial} draftKey={ink.draftKey} onClose={()=>setInk(null)} onSave={d=>{ink.onSave&&ink.onSave(d);}}/>}
     <Lightbox state={light} onClose={()=>setLight(null)}/>
     <PdfViewer open={!!pdfv} slot={pdfv?.slot} start={pdfv?.start} title={pdfv?.title} onClose={()=>setPdfv(null)}/>
     <SceneInfo open={!!info} init={info} locations={project.locations} onClose={()=>setInfo(null)} onSave={saveInfo} onDelete={delScene}/>
