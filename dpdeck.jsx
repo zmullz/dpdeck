@@ -2158,24 +2158,68 @@ function CrewEditor({open,dept,init,onClose,onSave,onDelete}){
     </div>
   </Modal>;
 }
+// One unified Crew page: the DP's own departments (project.crew) at the top, then the rest of the
+// production crew + vendors as project.contacts grouped under department headers (a `dept` field).
+const MY_DEPTS=[{k:"camera",label:"Camera"},{k:"grip",label:"Grip"},{k:"electric",label:"Electric"},{k:"sfx",label:"SFX"}];
+const CONTACT_DEPTS=["Director & Producers","Production","AD & Script","Locations","Casting","Art Department","Costume","Hair & Makeup","Sound","SFX","Stunts","Picture Vehicles","Catering & Base Camp","Post-Production","Production Office","Vendors & Suppliers","Other"];
+function PersonCard({m,meta,onEdit,crew}){
+  return <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:11,padding:13}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+      <div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:14.5,fontWeight:700,color:c.t0,overflow:"hidden",textOverflow:"ellipsis"}}>{m.name}</div>{m.role&&<div style={{fontFamily:UI,fontSize:12,color:c.accent,marginTop:1}}>{m.role}</div>}</div>
+      <div style={{display:"flex",gap:4,flexShrink:0}}>{(crew&&(m.pron||m.name))&&<IconBtn icon={Volume2} size={15} dim onClick={()=>say(m.pron||m.name)} title="Hear name"/>}<IconBtn icon={Settings} size={15} dim onClick={onEdit} title="Edit"/></div>
+    </div>
+    {m.pron&&<div style={{fontFamily:MONO,fontSize:11,color:c.t2,marginTop:5}}>{m.pron}</div>}
+    {m.address&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,marginTop:6}}>{m.address}</div>}
+    <div style={{display:"flex",gap:12,marginTop:9,alignItems:"center",flexWrap:"wrap"}}>
+      {m.lat&&meta&&<TravelChip meta={meta} lat={m.lat} lng={m.lng}/>}
+      {m.address&&<a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.address)}`} target="_blank" rel="noreferrer" style={{color:c.t1}} title="Maps"><MapPin size={14}/></a>}
+      {m.phone&&<a href={`tel:${m.phone}`} style={{color:c.t1}} title={m.phone}><Phone size={14}/></a>}
+      {m.email&&<a href={`mailto:${m.email}`} style={{color:c.t1}} title={m.email}><Mail size={14}/></a>}
+    </div>
+  </div>;
+}
+function DeptBlock({label,sub,count,onAdd,children}){
+  return <div style={{marginBottom:6}}>
+    <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:9}}>
+      <div style={{fontFamily:UI,fontSize:13.5,fontWeight:700,color:c.t1}}>{label}</div>
+      {count>0&&<div style={{fontFamily:MONO,fontSize:11,color:c.t2}}>{count}</div>}
+      <div style={{flex:1,height:1,background:c.line}}/>
+      {onAdd&&<IconBtn icon={Plus} size={16} dim onClick={onAdd} title={`Add to ${label}`}/>}
+    </div>
+    {children}
+  </div>;
+}
 function Crew({project,setProject}){
-  const [ed,setEd]=useState(null);
-  const crew=project.crew||{camera:[],grip:[],electric:[]};
-  const save=(dept,m)=>setProject(p=>{const list=p.crew[dept]||[];return {...p,crew:{...p.crew,[dept]:m.id?list.map(x=>x.id===m.id?m:x):[...list,{...m,id:uid()}]}};});
-  const del=(dept,id)=>setProject(p=>({...p,crew:{...p.crew,[dept]:(p.crew[dept]||[]).filter(x=>x.id!==id)}}));
-  return <div style={{display:"flex",flexDirection:"column",gap:16}}>
-    {DEPTS.map(d=><div key={d.k}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}><div style={{fontFamily:UI,fontSize:15,fontWeight:700,color:c.t0}}>{d.label}</div><IconBtn icon={Plus} size={18} onClick={()=>setEd({dept:d.k,m:{}})}/></div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:10}}>
-        {(crew[d.k]||[]).length===0&&<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,border:`1px dashed ${c.line2}`,borderRadius:10,padding:14}}>No {d.label.toLowerCase()} crew yet.</div>}
-        {(crew[d.k]||[]).map(m=><div key={m.id} style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:11,padding:13}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:15,fontWeight:700,color:c.t0}}>{m.name}</div>{m.role&&<div style={{fontFamily:UI,fontSize:12,color:c.accent,marginTop:1}}>{m.role}</div>}</div><div style={{display:"flex",gap:4}}><IconBtn icon={Volume2} size={15} dim onClick={()=>say(m.pron||m.name)} title="Hear name"/><IconBtn icon={Settings} size={15} dim onClick={()=>setEd({dept:d.k,m})}/></div></div>
-          {m.pron&&<div style={{fontFamily:MONO,fontSize:11,color:c.t2,marginTop:5}}>{m.pron}</div>}
-          <div style={{display:"flex",gap:13,marginTop:9}}>{m.phone&&<a href={`tel:${m.phone}`} style={{color:c.t1,textDecoration:"none"}}><Phone size={14}/></a>}{m.email&&<a href={`mailto:${m.email}`} style={{color:c.t1,textDecoration:"none"}}><Mail size={14}/></a>}</div>
-        </div>)}
+  const [crewEd,setCrewEd]=useState(null);   // {dept, m}
+  const [conEd,setConEd]=useState(null);      // contact obj (existing) or {dept} (new)
+  const crew=project.crew||{};
+  const contacts=project.contacts||[];
+  const meta=project.meta;
+  const saveCrew=(dept,m)=>setProject(p=>{const list=p.crew[dept]||[];return {...p,crew:{...p.crew,[dept]:m.id?list.map(x=>x.id===m.id?m:x):[...list,{...m,id:uid()}]}};});
+  const delCrew=(dept,id)=>setProject(p=>({...p,crew:{...p.crew,[dept]:(p.crew[dept]||[]).filter(x=>x.id!==id)}}));
+  const saveCon=ct=>setProject(p=>({...p,contacts:ct.id?p.contacts.map(x=>x.id===ct.id?ct:x):[...p.contacts,{...ct,id:uid()}]}));
+  const delCon=id=>setProject(p=>({...p,contacts:p.contacts.filter(x=>x.id!==id)}));
+  const byDept={};for(const ct of contacts){const dep=(ct.dept&&CONTACT_DEPTS.includes(ct.dept))?ct.dept:"Other";(byDept[dep]=byDept[dep]||[]).push(ct);}
+  const grid=ch=><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:10}}>{ch}</div>;
+  return <div style={{display:"flex",flexDirection:"column",gap:24}}>
+    <div>
+      <div style={{fontFamily:UI,fontSize:13,fontWeight:800,letterSpacing:"0.06em",textTransform:"uppercase",color:c.accent,marginBottom:12}}>Your crew</div>
+      {MY_DEPTS.map(d=>{const ppl=crew[d.k]||[];if(d.k==="sfx"&&!ppl.length)return null;return <DeptBlock key={d.k} label={d.label} count={ppl.length} onAdd={()=>setCrewEd({dept:d.k,m:{}})}>
+        {ppl.length?grid(ppl.map(m=><PersonCard key={m.id} m={m} meta={meta} crew onEdit={()=>setCrewEd({dept:d.k,m})}/>)):<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,border:`1px dashed ${c.line2}`,borderRadius:10,padding:13}}>No {d.label.toLowerCase()} crew yet.</div>}
+      </DeptBlock>;})}
+    </div>
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,gap:8,flexWrap:"wrap"}}>
+        <div style={{fontFamily:UI,fontSize:13,fontWeight:800,letterSpacing:"0.06em",textTransform:"uppercase",color:c.accent}}>Production & contacts</div>
+        <Btn kind="ghost" size={12} onClick={()=>setConEd({dept:"Production"})}><Plus size={15}/>Add contact</Btn>
       </div>
-    </div>)}
-    <CrewEditor open={!!ed} dept={ed?.dept} init={ed?.m} onClose={()=>setEd(null)} onSave={m=>save(ed.dept,m)} onDelete={id=>del(ed.dept,id)}/>
+      {contacts.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,border:`1px dashed ${c.line2}`,borderRadius:10,padding:14}}>No production crew or contacts yet. Hand Claude the crew list, or add them here.</div>:
+        CONTACT_DEPTS.map(dep=>{const ppl=byDept[dep]||[];if(!ppl.length)return null;return <DeptBlock key={dep} label={dep} count={ppl.length} onAdd={()=>setConEd({dept:dep})}>
+          {grid(ppl.map(ct=><PersonCard key={ct.id} m={ct} meta={meta} onEdit={()=>setConEd(ct)}/>))}
+        </DeptBlock>;})}
+    </div>
+    <CrewEditor open={!!crewEd} dept={crewEd?.dept} init={crewEd?.m} onClose={()=>setCrewEd(null)} onSave={m=>saveCrew(crewEd.dept,m)} onDelete={id=>delCrew(crewEd.dept,id)}/>
+    <ContactEditor open={!!conEd} init={conEd} onClose={()=>setConEd(null)} onSave={saveCon} onDelete={delCon}/>
   </div>;
 }
 
@@ -2207,7 +2251,10 @@ function ContactEditor({open,init,onClose,onSave,onDelete}){
     footer={<>{init?.id&&<Btn kind="danger" onClick={()=>{onDelete(init.id);onClose();}}><Trash2 size={15}/>Delete</Btn>}<Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={!f.name} onClick={()=>{onSave(f);onClose();}}>Save</Btn></>}>
     <div style={{display:"flex",flexDirection:"column",gap:13}}>
       <Field label="Name"><TextInput value={f.name||""} onChange={e=>set("name",e.target.value)} placeholder="ATM System / WFDiF lab / rental"/></Field>
-      <Field label="What they are"><TextInput value={f.role||""} onChange={e=>set("role",e.target.value)} placeholder="Camera rental, lab, production office…"/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11}}>
+        <Field label="What they are"><TextInput value={f.role||""} onChange={e=>set("role",e.target.value)} placeholder="Sound Mixer, rental, lab…"/></Field>
+        <Field label="Department"><select value={f.dept||"Other"} onChange={e=>set("dept",e.target.value)} style={{...inputStyle(),cursor:"pointer"}}>{CONTACT_DEPTS.map(d=><option key={d} value={d}>{d}</option>)}</select></Field>
+      </div>
       <Field label="Address"><TextInput value={f.address||""} onChange={e=>set("address",e.target.value)}/></Field>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11}}><Field label="Latitude"><TextInput value={f.lat||""} onChange={e=>set("lat",e.target.value)}/></Field><Field label="Longitude"><TextInput value={f.lng||""} onChange={e=>set("lng",e.target.value)}/></Field></div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11}}><Field label="Phone"><TextInput value={f.phone||""} onChange={e=>set("phone",e.target.value)}/></Field><Field label="Email"><TextInput value={f.email||""} onChange={e=>set("email",e.target.value)}/></Field></div>
@@ -2842,7 +2889,6 @@ const NAV=[
   {k:"locations",label:"Locations",icon:MapPin},
   {k:"crew",label:"Crew",icon:Users},
   {k:"gear",label:"Gear",icon:Wrench},
-  {k:"contacts",label:"Contacts",icon:Building2},
   {k:"export",label:"Export PDF",icon:Printer},
   {k:"import",label:"Import",icon:Upload},
   {k:"settings",label:"Settings",icon:Settings},
@@ -3095,7 +3141,7 @@ export default function App(){
         {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn} focusLoc={focusLoc} onFocused={()=>setFocusLoc(null)}/>}
         {view==="crew"&&<Crew project={project} setProject={setProject}/>}
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
-        {view==="contacts"&&<Contacts project={project} setProject={setProject}/>}
+        {view==="contacts"&&<Crew project={project} setProject={setProject}/>}
         {view==="export"&&<div>
           <div data-noprint style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
             <div style={{width:270}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"}]}/></div>
@@ -3128,4 +3174,4 @@ export default function App(){
     <Toast toast={toast} onClose={()=>setToast(null)}/>
   </div>;
 }
-const TITLES={home:"Home",days:"Schedule",scenes:"Scenes",look:"Look",docs:"Documents",capture:"Capture",locations:"Locations",crew:"Crew",gear:"Gear",contacts:"Contacts",export:"Export PDF",import:"Import",settings:"Settings",scene:""};
+const TITLES={home:"Home",days:"Schedule",scenes:"Scenes",look:"Look",docs:"Documents",capture:"Capture",locations:"Locations",crew:"Crew",gear:"Gear",contacts:"Crew",export:"Export PDF",import:"Import",settings:"Settings",scene:""};
