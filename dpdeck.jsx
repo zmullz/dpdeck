@@ -3030,7 +3030,7 @@ export default function App(){
         await store.set("pb:project",mir.project);await store.set("pb:project_mtime",mir.mtime||Date.now());
       }
     }catch{}
-    applyTheme(p.meta.theme);setProject(p);
+    applyTheme(p.meta.theme);setProject(p);mirrorLocal(p);   // seed the localStorage mirror on load so it protects from the first moment, not only after the first edit
     setView(p.scenes.length?"home":"import");
     restoreScriptPDF().then(()=>setTb(b=>b+1));
     setTimeout(()=>{loaded.current=true;
