@@ -1242,6 +1242,8 @@ function SunCompass({lat,lng,tz,date,hm}){
 function SunMap({lat,lng,tz,date,hm,size=200}){
   const sun=useMemo(()=>{try{const t=sunTimes(dayNoonUTC(date),+lat,+lng);const azOf=d=>d&&!isNaN(d)?azC(sunPos(d,+lat,+lng).az).deg:null;return {sr:azOf(t.sunrise),ss:azOf(t.sunset)};}catch{return null;}},[lat,lng,date]);
   const cur=useMemo(()=>{try{const p=sunPos(localToAbs(date,Math.floor(hm/60),hm%60,tz),+lat,+lng);return {az:azC(p.az).deg,alt:p.alt*180/PI};}catch{return null;}},[lat,lng,tz,date,hm]);
+  const [errN,setErrN]=useState(0);
+  useEffect(()=>{setErrN(0);},[lat,lng,size]);   // reset tile-error count when the view recenters
   if(lat==null||lat===""||lng==null||lng==="")return null;
   const la=+lat,ln=+lng;
   // Native Esri World Imagery XYZ tiles (sharp, keyless), stitched + centered on the exact coordinate.
@@ -1250,6 +1252,7 @@ function SunMap({lat,lng,tz,date,hm,size=200}){
   const n=2**z,xf=n*(ln+180)/360,yf=n*(1-Math.log(Math.tan(la*rad)+1/Math.cos(la*rad))/PI)/2;
   const xt=Math.floor(xf),yt=Math.floor(yf),k=Math.ceil((size/2)/256)+1;
   const tiles=[];for(let dy=-k;dy<=k;dy++)for(let dx=-k;dx<=k;dx++){const tx=xt+dx,ty=yt+dy;if(tx<0||ty<0||tx>=n||ty>=n)continue;tiles.push({tx,ty,sx:(tx-xf)*256+size/2,sy:(ty-yf)*256+size/2});}
+  const offline=tiles.length>0&&errN>=tiles.length;   // every tile failed (offline / blocked) -> show a note; the sun overlay below stays accurate
   const tileUrl=t=>`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${t.ty}/${t.tx}`;
   const S=size,cc=S/2,R=S/2-3;
   const pt=(deg,r)=>[cc+r*Math.sin(deg*rad),cc-r*Math.cos(deg*rad)];
@@ -1262,8 +1265,9 @@ function SunMap({lat,lng,tz,date,hm,size=200}){
   return <div style={{width:size,flexShrink:0}}>
     <div style={{position:"relative",width:size,height:size,borderRadius:12,overflow:"hidden",border:`1px solid ${c.line2}`,background:c.bg2}}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{position:"absolute",inset:0}}>
-        {tiles.map(t=><image key={t.tx+"_"+t.ty} href={tileUrl(t)} x={t.sx.toFixed(2)} y={t.sy.toFixed(2)} width="256.5" height="256.5" preserveAspectRatio="none"/>)}
+        {tiles.map(t=><image key={t.tx+"_"+t.ty} href={tileUrl(t)} x={t.sx.toFixed(2)} y={t.sy.toFixed(2)} width="256.5" height="256.5" preserveAspectRatio="none" onError={()=>setErrN(n=>n+1)}/>)}
       </svg>
+      {offline&&<div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",fontFamily:UI,fontSize:11,color:c.t2,textAlign:"center",padding:10,pointerEvents:"none"}}>Satellite view offline (sun overlay still accurate)</div>}
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{position:"absolute",inset:0,pointerEvents:"none"}}>
         <circle cx={cc} cy={cc} r={R} fill="none" stroke="#0007" strokeWidth={1}/>
         {arcPath&&<path d={arcPath} fill="none" stroke="#ffd27a" strokeWidth={4} strokeLinecap="round" opacity={0.85}/>}
@@ -1319,13 +1323,27 @@ function SunPanel({lat,lng,tz,date}){
   </div>;
 }
 const wxCache=new Map();
+const wxKey=(lat,lng,date)=>`${(+lat).toFixed(3)},${(+lng).toFixed(3)},${date}`;
+// Fetch + cache one day's forecast. Caches ok/far results; never caches errors (so a retry can succeed).
+// Used by useWeather (live) and to pre-warm the cache before printing DP Sides.
+async function fetchWeather(lat,lng,date){
+  if(lat==null||lng==null||lng===""||lat===""||!date)return {s:"idle"};
+  const key=wxKey(lat,lng,date);
+  if(wxCache.has(key))return wxCache.get(key);
+  try{
+    const d=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=16`).then(r=>r.json());
+    const i=d?.daily?.time?d.daily.time.indexOf(date):-1;
+    const r=(i<0)?{s:"far"}:{s:"ok",code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]};
+    wxCache.set(key,r);return r;
+  }catch{return {s:"err"};}
+}
 function useWeather(lat,lng,date){
   const [st,setSt]=useState({s:"idle"});
-  useEffect(()=>{let on=true;if(lat==null||lng==null||!date){setSt({s:"idle"});return;}
-    const key=`${(+lat).toFixed(3)},${(+lng).toFixed(3)},${date}`;
+  useEffect(()=>{let on=true;if(lat==null||lng==null||lat===""||lng===""||!date){setSt({s:"idle"});return;}
+    const key=wxKey(lat,lng,date);
     if(wxCache.has(key)){setSt(wxCache.get(key));return;}
     setSt({s:"load"});
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${+lat}&longitude=${+lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=16`).then(r=>r.json()).then(d=>{if(!on)return;const i=d?.daily?.time?d.daily.time.indexOf(date):-1;let r;if(i<0)r={s:"far"};else r={s:"ok",code:d.daily.weather_code[i],hi:d.daily.temperature_2m_max[i],lo:d.daily.temperature_2m_min[i],pr:d.daily.precipitation_probability_max[i],wind:d.daily.wind_speed_10m_max[i]};wxCache.set(key,r);setSt(r);}).catch(()=>{if(on)setSt({s:"err"});});
+    fetchWeather(lat,lng,date).then(r=>{if(on)setSt(r);});
     return()=>{on=false;};},[lat,lng,date]);
   return st;
 }
@@ -3067,9 +3085,15 @@ function GearSheet({project,depts,by="dept"}){
    script, shots, gear, location and references. One day per page; pick a day or send them all. */
 function PrintWeather({lat,lng,date}){
   const st=useWeather(lat,lng,date);
-  if(st.s!=="ok")return <span style={{color:"#888"}}>forecast not in range yet</span>;
-  const {label}=wxMeta(st.code);
-  return <span>{label}, {Math.round(st.hi)}°/{Math.round(st.lo)}°F{st.pr>=30?`, ${st.pr}% rain`:""}{st.wind?`, wind ${Math.round(st.wind)} mph`:""}</span>;
+  if(st.s==="ok"){const {label}=wxMeta(st.code);return <span>{label}, {Math.round(st.hi)}°/{Math.round(st.lo)}°F{st.pr>=30?`, ${st.pr}% rain`:""}{st.wind?`, wind ${Math.round(st.wind)} mph`:""}</span>;}
+  return <span style={{color:"#888"}}>{st.s==="far"?"forecast opens about 16 days out":st.s==="err"?"forecast unavailable":"checking forecast…"}</span>;
+}
+// Single source of truth for the per-shoot-day list (used by SidesDoc, the export day picker, and weather pre-warm).
+function sidesDays(project){
+  let d;
+  if(project.days&&project.days.length)d=project.days.map(x=>({day:String(x.day),date:x.date||"",nums:(x.scenes||[]).map(String)}));
+  else d=groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(z=>z.shootDate)||{}).shootDate||"",nums:[...sc].sort((a,b)=>(+a.shootOrder||0)-(+b.shootOrder||0)).map(z=>String(z.number))}));
+  return d.filter(x=>x.day).sort((a,b)=>cmpNum(a.day,b.day));
 }
 function SidesDoc({project,dayFilter}){
   const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00",soft:"#f5f2ec"};
@@ -3078,21 +3102,18 @@ function SidesDoc({project,dayFilter}){
   const sceneByNum=new Map(project.scenes.map(s=>[numKey(s.number),s]));
   const loc=id=>project.locations.find(l=>l.id===id);
   const gearOf=s=>(s.gearTags||[]).map(id=>project.gear.find(g=>g.id===id)).filter(Boolean);
-  let allDays;
-  if(project.days&&project.days.length)allDays=project.days.map(d=>({day:String(d.day),date:d.date||"",nums:(d.scenes||[]).map(String)}));
-  else allDays=groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(x=>x.shootDate)||{}).shootDate||"",nums:[...sc].sort((a,b)=>(+a.shootOrder||0)-(+b.shootOrder||0)).map(x=>String(x.number))}));
-  allDays=allDays.filter(d=>d.day).sort((a,b)=>cmpNum(a.day,b.day));
+  const allDays=sidesDays(project);
   const days=(dayFilter&&dayFilter!=="all")?allDays.filter(d=>String(d.day)===String(dayFilter)):allDays;
   const imgRow=(arr,h)=>arr&&arr.length?<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:6}}>{arr.map((v,i)=><StoredImg key={i} id={v} style={{height:h,maxWidth:"31%",objectFit:"cover",border:`1px solid ${P.line}`,borderRadius:4,background:P.soft}}/>)}</div>:null;
   return <div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>
     {days.length===0&&<div style={{fontFamily:UI,fontSize:13,color:P.muted}}>{allDays.length?"That shoot day has no scenes. Pick another day, or choose All shoot days.":"No shoot days scheduled yet. Add a schedule in Settings, under Import."}</div>}
-    {days.map(day=>{
+    {days.map((day,di)=>{
       const scenes=day.nums.map(n=>sceneByNum.get(numKey(n))).filter(Boolean).filter(s=>s.status!=="omitted");
       const dloc=dayLocation(scenes,project.locations);
       const dt=day.date?new Date(day.date+"T12:00"):null;
       const gear=Object.fromEntries(DEPTS.map(d=>[d.k,new Set()]));scenes.forEach(s=>gearOf(s).forEach(g=>{if(gear[g.dept])gear[g.dept].add(g.name);}));
       const eighths=scenes.reduce((a,s)=>a+(+s.eighths||0),0);
-      return <div key={day.day} className="pd-day">
+      return <div key={day.day+"_"+di} className="pd-day">
         <div style={{borderBottom:`2px solid ${P.text}`,paddingBottom:8,marginBottom:12}}>
           <div style={{display:"flex",alignItems:"baseline",gap:12,flexWrap:"wrap"}}>
             <span style={{fontFamily:SERIF,fontSize:26,fontWeight:700}}>Day {day.day}</span>
@@ -3101,13 +3122,13 @@ function SidesDoc({project,dayFilter}){
             <span style={{fontFamily:MONO,fontSize:12,color:P.muted}}>{scenes.length} scene{scenes.length===1?"":"s"}{eighths?` · ${fmtEighths(eighths)} pg`:""}</span>
           </div>
           <div style={{fontFamily:UI,fontSize:11.5,color:P.muted,marginTop:5}}>{m.title||"Untitled Film"}{dloc?` · ${dloc.name}`:""}</div>
-          {dloc&&dloc.lat&&day.date&&<div style={{fontFamily:UI,fontSize:11.5,color:P.text,marginTop:5,lineHeight:1.7}}>
+          {dloc&&dloc.lat!=null&&dloc.lat!==""&&day.date&&<div style={{fontFamily:UI,fontSize:11.5,color:P.text,marginTop:5,lineHeight:1.7}}>
             <div><b>Sun:</b> <ExportSun lat={dloc.lat} lng={dloc.lng} tz={m.tz} date={day.date}/></div>
             <div><b>Weather:</b> <PrintWeather lat={dloc.lat} lng={dloc.lng} date={day.date}/></div>
           </div>}
         </div>
         {DEPTS.some(d=>gear[d.k].size)&&<div style={{marginBottom:12}}><span style={sub}>Gear this day</span><div style={{marginTop:3}}>{DEPTS.map(d=>gear[d.k].size?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {[...gear[d.k]].join(", ")}</div>:null)}</div></div>}
-        {scenes.map(s=>{const l=loc(s.locationId);const g=gearOf(s);return <div key={s.number} className="pd-scene" style={{marginBottom:16,paddingBottom:13,borderBottom:`1px solid ${P.line}`}}>
+        {scenes.map((s,si)=>{const l=loc(s.locationId);const g=gearOf(s);return <div key={s.number+"_"+si} className="pd-scene" style={{marginBottom:16,paddingBottom:13,borderBottom:`1px solid ${P.line}`}}>
           <div style={{display:"flex",alignItems:"baseline",gap:9,flexWrap:"wrap"}}>
             {s.shootOrder?<span style={{fontFamily:MONO,fontSize:11,color:P.muted}}>#{s.shootOrder}</span>:null}
             <span style={{fontFamily:MONO,fontSize:18,fontWeight:700,color:P.accent}}>{s.number}</span>
@@ -3494,8 +3515,19 @@ export default function App(){
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
         {view==="contacts"&&<Crew project={project} setProject={setProject}/>}
         {view==="export"&&(()=>{
-          const dayList=((project.days&&project.days.length)?project.days.map(d=>({day:String(d.day),date:d.date||""})):groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(x=>x.shootDate)||{}).shootDate||""}))).filter(d=>d.day).sort((a,b)=>cmpNum(a.day,b.day));
+          const dayList=sidesDays(project);
+          const dayVal=(exp.day!=="all"&&!dayList.some(d=>String(d.day)===String(exp.day)))?"all":exp.day;   // a stale day selection (after a schedule re-import) falls back to All
           const desc=exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then print.":exp.mode==="gear"?(exp.gearBy==="scene"?"Gear pull organized by scene: every scene with the specialty gear it needs, in shooting order. Toggle departments to include.":"Gear pull by department: each item with the scenes it is needed on. Toggle departments to include."):"DP Sides: a per-shoot-day packet to send the crew. Each day has its schedule, every scene with script, shots, gear, location, sun and weather. Pick one day or send them all. Scroll through once so images load, then print.";
+          // For DP Sides, pre-fetch every selected day's weather (and let React settle) before printing, so the crew PDF shows real forecasts instead of "checking forecast".
+          const doPrint=async()=>{
+            if(exp.mode==="sides"){try{
+              const byNum=new Map(project.scenes.map(s=>[numKey(s.number),s]));
+              const sel=(dayVal!=="all")?dayList.filter(d=>String(d.day)===String(dayVal)):dayList;
+              await Promise.all(sel.map(d=>{const sc=d.nums.map(n=>byNum.get(numKey(n))).filter(Boolean);const l=dayLocation(sc,project.locations);return (l&&l.lat!=null&&l.lat!==""&&d.date)?fetchWeather(l.lat,l.lng,d.date):null;}).filter(Boolean));
+              await new Promise(r=>setTimeout(r,180));
+            }catch{}}
+            window.print();
+          };
           return <div>
           <div data-noprint style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
             <div style={{width:340}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"},{k:"sides",label:"DP Sides"}]}/></div>
@@ -3503,14 +3535,14 @@ export default function App(){
               <div style={{width:230}}><Segmented value={exp.gearBy} onChange={v=>setExp(e=>({...e,gearBy:v||"dept"}))} options={[{k:"dept",label:"By department"},{k:"scene",label:"By scene"}]}/></div>
               <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{DEPTS.map(d=>{const on=exp.depts.includes(d.k);return <button key={d.k} onClick={()=>setExp(e=>({...e,depts:on?e.depts.filter(x=>x!==d.k):[...e.depts,d.k]}))} style={{padding:"8px 12px",borderRadius:8,border:`1px solid ${on?c.accent:c.line2}`,background:on?c.accentSoft:c.bg2,color:on?c.accent:c.t1,fontFamily:UI,fontSize:13,fontWeight:650,cursor:"pointer"}}>{d.label}</button>;})}</div>
             </>}
-            {exp.mode==="sides"&&<select value={exp.day} onChange={e=>setExp(x=>({...x,day:e.target.value}))} style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${c.line2}`,background:c.bg2,color:c.t0,fontFamily:UI,fontSize:13,fontWeight:600}}>
+            {exp.mode==="sides"&&<select value={dayVal} onChange={e=>setExp(x=>({...x,day:e.target.value}))} style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${c.line2}`,background:c.bg2,color:c.t0,fontFamily:UI,fontSize:13,fontWeight:600}}>
               <option value="all">All shoot days</option>
               {dayList.map(d=><option key={d.day} value={d.day}>Day {d.day}{d.date?` · ${new Date(d.date+"T12:00").toLocaleDateString(undefined,{month:"short",day:"numeric"})}`:""}</option>)}
             </select>}
-            <Btn kind="primary" size={13} onClick={()=>window.print()}><Printer size={16}/>Print / Save as PDF</Btn>
+            <Btn kind="primary" size={13} onClick={doPrint}><Printer size={16}/>Print / Save as PDF</Btn>
           </div>
           <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:640,marginBottom:14}}>{desc}</div>
-          {exp.mode==="full"?<ExportDoc project={project}/>:exp.mode==="gear"?<GearSheet project={project} depts={exp.depts} by={exp.gearBy}/>:<SidesDoc project={project} dayFilter={exp.day}/>}
+          {exp.mode==="full"?<ExportDoc project={project}/>:exp.mode==="gear"?<GearSheet project={project} depts={exp.depts} by={exp.gearBy}/>:<SidesDoc project={project} dayFilter={dayVal}/>}
           </div>;
         })()}
         {view==="import"&&<Import project={project} setProject={setProject} onToast={toastFn}/>}
