@@ -939,8 +939,8 @@ function InkCanvas({initial,bgUrl,onClose,onSave,title,draftKey}){
   const [view,setView]=useState({s:1,tx:0,ty:0});
   const draw=useRef(null),drag=useRef(null),aspect=useRef(initial?.aspect||4/3);
   const dkey=draftKey?("pb:inkdraft:"+draftKey):null,dsave=useRef(null);
-  // Recover strokes from a prior crash/close, but ONLY when the draft has MORE strokes than what we opened with
-  // — restores added work, never resurrects an erase or overrides a version that was already saved with Done.
+  // Recover strokes from a prior crash/close, but ONLY when the draft has MORE strokes than what we opened
+  // with (restores added work, never resurrects an erase or overrides a version already saved with Done).
   useEffect(()=>{if(!dkey)return;let on=true;store.get(dkey).then(d=>{if(on&&d&&Array.isArray(d.strokes)&&d.strokes.length>(initial?.strokes?.length||0)){if(d.aspect)aspect.current=d.aspect;setStrokes(d.strokes);}});return()=>{on=false;};},[dkey]);
   // Continuously autosave in-progress strokes to a scratch draft so nothing is lost if the editor is closed or
   // the app is evicted before Done. Debounced while drawing; flushed immediately when the tab hides.
@@ -2703,10 +2703,10 @@ function SettingsView({project,setProject,onToast,onThemeChange}){
       </>}
     </Card>
     <Card title="Device safety copies (automatic)" icon={Cloud}>
-      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>{R2_KEY?"Each device saves its own private copy of the prep data (scenes, schedule, gear, notes, crew, contacts — no photos) to your cloud under its own key, refreshed on every sync. Nothing one device typed can be wiped by another device or a bad merge. If a device's deck ever looks wrong, restore its copy here. This runs silently; you don't need to do anything.":"Turn on Cloud sync above and each device keeps its own clobber-proof safety copy here."}</div>
+      <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>{R2_KEY?"Each device saves its own private copy of the prep data (scenes, schedule, gear, notes, crew, contacts; no photos) to your cloud under its own key, refreshed on every sync. Nothing one device typed can be wiped by another device or a bad merge. If a device's deck ever looks wrong, restore its copy here. This runs silently; you don't need to do anything.":"Turn on Cloud sync above and each device keeps its own clobber-proof safety copy here."}</div>
       {R2_KEY&&<>
         {shadows===null?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>Loading…</div>:
-         shadows.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>No copies yet — one is written the next time the deck syncs.</div>:
+         shadows.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>No copies yet. One is written the next time the deck syncs.</div>:
          <div style={{display:"flex",flexDirection:"column",gap:7,maxHeight:240,overflowY:"auto"}}>
            {shadows.map(s=><div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,padding:"8px 11px"}}>
              <div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0}}>{(s.label||"Device")}{s.id===myDev?" · this device":""}</div><div style={{fontFamily:MONO,fontSize:10.5,color:c.t2}}>{s.ts?new Date(s.ts).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):s.id.slice(0,8)}</div></div>
@@ -3022,7 +3022,7 @@ export default function App(){
     }catch{pulling.current=false;setSync({state:"error",at:Date.now()});}}
     let p=normalizeProject(await store.get("pb:project"));
     // REDUNDANCY: if IndexedDB was wiped/corrupted (came back empty) but the localStorage mirror still holds the
-    // deck, recover from it. Deliberately conservative — only fires when IDB has NO scenes, so it can never roll a
+    // deck, recover from it. Deliberately conservative: only fires when IDB has NO scenes, so it can never roll a
     // good IDB deck (or a freshly-pulled cloud deck) backward. The mirror is cleared on a deliberate Erase.
     try{const mir=readMirror();
       if(!pulled&&!(p.scenes&&p.scenes.length)&&mir&&mir.project&&Array.isArray(mir.project.scenes)&&mir.project.scenes.length){
