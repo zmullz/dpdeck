@@ -645,7 +645,16 @@ async function pruneAndIndex(idx){idx.sort((a,b)=>(a.ts||0)-(b.ts||0));while(idx
 async function writeDailySnapshot(serialized,ts){
   if(!R2_KEY)return;
   const day=new Date(ts).toISOString().slice(0,10);
-  if((await store.get("pb:snap_day"))===day)return; // already have today's snapshot
+  if((await store.get("pb:snap_day"))===day)return; // this device already wrote today's snapshot
+  // Never let a same-day snapshot be replaced by a deck with FEWER scenes: the "one per day" check is
+  // per-device, so a stale/partial device must not be able to destroy a good point-in-time snapshot
+  // another device wrote earlier today. Belt-and-suspenders for recovery alongside the push-shrink guard.
+  try{
+    const incCount=(((JSON.parse(serialized).data||{})["pb:project"]||{}).scenes||[]).length;
+    const exRaw=await r2ReadRaw(snapKey(day));
+    if(exRaw){const exCount=(((JSON.parse(exRaw).data||{})["pb:project"]||{}).scenes||[]).length;
+      if(exCount>incCount){await store.set("pb:snap_day",day);return;}}  // keep the bigger existing snapshot
+  }catch{}
   await r2Write(snapKey(day),serialized);
   const idx=await readSnapshotIndex();
   if(!idx.some(s=>s.tag===day))idx.push({tag:day,ts,label:day});
