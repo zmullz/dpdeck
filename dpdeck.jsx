@@ -466,7 +466,7 @@ function mergeScene(base,ours,theirs){
   o.sketches=merge3List(base&&base.sketches,ours.sketches,theirs.sketches,x=>x);
   o.gearTags=merge3List(base&&base.gearTags,ours.gearTags,theirs.gearTags,x=>x);
   o.aiGear=merge3List(base&&base.aiGear,ours.aiGear,theirs.aiGear,x=>x.text);
-  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay"])
+  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod"])
     o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
   o._mt=Math.max(om,tm);
   return o;
@@ -643,7 +643,7 @@ function extractJSON(raw){
   if(a<0||b<0)throw new Error("Could not read a scene list from the response.");
   return JSON.parse(s.slice(a,b+1));
 }
-function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
+function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",tod:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
 /* Scene length in eighths of a page -> the film-standard "N M/8" label (19 -> "2 3/8", 3 -> "3/8"). */
 const fmtEighths=e=>{e=+e||0;if(!e)return "";const w=Math.floor(e/8),f=e%8;return w?(f?`${w} ${f}/8`:`${w}`):`${f}/8`;};
 const dayEighths=scenes=>scenes.reduce((n,s)=>n+(+s.eighths||0),0);
@@ -1667,6 +1667,11 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
       <div>
         <Label style={{marginBottom:6}}>Notes</Label>
         <TextArea value={scene.notes} placeholder="Ideas, intent, references to the look…" onChange={e=>patchScene({notes:e.target.value})}/>
+      </div>
+      <div>
+        <Label style={{marginBottom:6}}>Time of day</Label>
+        <TextArea value={scene.tod||""} placeholder="Ideal window to shoot, e.g. golden hour 18:00-19:30, or avoid harsh midday" onChange={e=>patchScene({tod:e.target.value})} style={{minHeight:54}}/>
+        <div style={{fontFamily:UI,fontSize:11.5,color:c.t2,marginTop:5,lineHeight:1.4}}>The ideal shooting window for this scene. Exports to the AD as a Time of day PDF.</div>
       </div>
       <ShotList scene={scene} patchScene={patchScene}/>
       <GearBlock scene={scene} gearList={gearList} addGear={addGear} patchScene={patchScene}/>
@@ -3081,6 +3086,36 @@ function GearSheet({project,depts,by="dept"}){
   </div>;}));
 }
 
+/* TIME OF DAY: a one-page list of every scene with an ideal shooting window noted, in shooting order.
+   For the AD to schedule scenes against the sun. Only scenes that have a time-of-day note appear. */
+function TimeOfDaySheet({project}){
+  const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00"};
+  const scenes=project.scenes.filter(s=>s.status!=="omitted"&&(s.tod||"").trim()).sort((a,b)=>{
+    const ad=a.shootDay?0:1,bd=b.shootDay?0:1;if(ad!==bd)return ad-bd;
+    if(a.shootDay&&b.shootDay){const cc=cmpNum(a.shootDay,b.shootDay);if(cc)return cc;const o=(+a.shootOrder||0)-(+b.shootOrder||0);if(o)return o;}
+    return cmpNum(a.number,b.number);
+  });
+  const head=<div style={{marginBottom:24}}>
+    <div style={{fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700,marginBottom:8}}>Time of day</div>
+    <div style={{fontFamily:SERIF,fontSize:32,fontWeight:700,lineHeight:1.1}}>{project.meta.title||"Untitled Film"}</div>
+    <div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:4}}>Ideal shooting window per scene · {scenes.length} scene{scenes.length===1?"":"s"} noted · Generated {new Date().toLocaleDateString(undefined,{year:"numeric",month:"long",day:"numeric"})}</div>
+  </div>;
+  return <div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>
+    {head}
+    {scenes.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>No time-of-day notes yet. Open a scene, add an ideal shooting window in the Time of day field, and it will appear here.</div>:
+      <table style={{width:"100%",borderCollapse:"collapse"}}><tbody>
+        {scenes.map(s=><tr key={s.number} className="pd-row" style={{borderBottom:`1px solid ${P.line}`}}>
+          <td style={{padding:"9px 8px",fontFamily:MONO,fontSize:14,fontWeight:700,color:P.accent,verticalAlign:"top",width:62,whiteSpace:"nowrap"}}>{s.number}</td>
+          <td style={{padding:"9px 8px",verticalAlign:"top",width:"38%"}}>
+            <div style={{fontFamily:UI,fontSize:13,fontWeight:700,lineHeight:1.3}}>{s.slug} {s.set}</div>
+            <div style={{fontFamily:MONO,fontSize:10.5,color:P.muted,marginTop:2}}>{[s.dayNight,s.shootDay?`Day ${s.shootDay}`:"",s.storyDay?`Story ${s.storyDay}`:""].filter(Boolean).join(" · ")||"unscheduled"}</div>
+          </td>
+          <td style={{padding:"9px 8px",fontFamily:UI,fontSize:13,color:P.text,verticalAlign:"top",whiteSpace:"pre-wrap",lineHeight:1.45}}>{s.tod}</td>
+        </tr>)}
+      </tbody></table>}
+  </div>;
+}
+
 /* DP SIDES: a per-shoot-day crew packet: the day's schedule + sun + weather, then each scene with
    script, shots, gear, location and references. One day per page; pick a day or send them all. */
 function PrintWeather({lat,lng,date}){
@@ -3187,6 +3222,7 @@ function SidesDoc({project,dayFilter}){
           {s.syn&&<div style={{fontFamily:SERIF,fontSize:13,lineHeight:1.5,marginTop:6}}>{s.syn}</div>}
           {s.scriptText&&<div style={{marginTop:6}}><span style={sub}>Script</span><div style={{marginTop:3}}><ScreenplayText text={s.scriptText} base={P.text} strong={P.text} dim={P.muted} size={10}/></div></div>}
           {s.notes&&<div style={{marginTop:6}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
+          {(s.tod||"").trim()&&<div style={{marginTop:6}}><span style={sub}>Time of day</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.tod}</div></div>}
           {s.shots.length>0&&<div style={{marginTop:6}}><span style={sub}>Shots</span><div style={{marginTop:3}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12,lineHeight:1.5,display:"flex",gap:7}}><span style={{color:P.muted,fontFamily:MONO,fontSize:10,minWidth:16}}>{i+1}.</span><span>{sh.text}</span></div>)}</div></div>}
           {g.length>0&&<div style={{marginTop:6}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const di=g.filter(x=>x.dept===d.k);return di.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {di.map(x=>x.name).join(", ")}</div>:null;})}</div></div>}
           {s.refs.length>0&&<div style={{marginTop:6}}><span style={sub}>Reference</span>{imgRow(s.refs,110)}</div>}
@@ -3563,7 +3599,7 @@ export default function App(){
         {view==="export"&&(()=>{
           const dayList=sidesDays(project);
           const dayVal=(exp.day!=="all"&&!dayList.some(d=>String(d.day)===String(exp.day)))?"all":exp.day;   // a stale day selection (after a schedule re-import) falls back to All
-          const desc=exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then print.":exp.mode==="gear"?(exp.gearBy==="scene"?"Gear pull organized by scene: every scene with the specialty gear it needs, in shooting order. Toggle departments to include.":"Gear pull by department: each item with the scenes it is needed on. Toggle departments to include."):"DP Sides: a per-shoot-day packet to send the crew. Each day has its schedule, every scene with script, shots, gear, location, sun and weather. Pick one day or send them all. Scroll through once so images load, then print.";
+          const desc=exp.mode==="full"?"Full package: script, synopsis, notes, shot lists, gear, reference frames, blocking, plus locations and crew/contacts. Scroll through once so images load, then print.":exp.mode==="gear"?(exp.gearBy==="scene"?"Gear pull organized by scene: every scene with the specialty gear it needs, in shooting order. Toggle departments to include.":"Gear pull by department: each item with the scenes it is needed on. Toggle departments to include."):exp.mode==="sides"?"DP Sides: a per-shoot-day packet to send the crew. Each day has its schedule, every scene with script, shots, gear, location, sun and weather. Pick one day or send them all. Scroll through once so images load, then print.":"Time of day: a one-page list of every scene with an ideal shooting window noted, in shooting order. Hand it to the AD to schedule against the sun. Add a window in any scene's Time of day field.";
           // For DP Sides, pre-fetch every selected day's weather (and let React settle) before printing, so the crew PDF shows real forecasts instead of "checking forecast".
           const doPrint=async()=>{
             if(exp.mode==="sides"){try{
@@ -3576,7 +3612,7 @@ export default function App(){
           };
           return <div>
           <div data-noprint style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
-            <div style={{width:340}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"},{k:"sides",label:"DP Sides"}]}/></div>
+            <div style={{maxWidth:470}}><Segmented value={exp.mode} onChange={v=>setExp(e=>({...e,mode:v||"full"}))} options={[{k:"full",label:"Full package"},{k:"gear",label:"Gear pull"},{k:"sides",label:"DP Sides"},{k:"tod",label:"Time of day"}]}/></div>
             {exp.mode==="gear"&&<>
               <div style={{width:230}}><Segmented value={exp.gearBy} onChange={v=>setExp(e=>({...e,gearBy:v||"dept"}))} options={[{k:"dept",label:"By department"},{k:"scene",label:"By scene"}]}/></div>
               <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{DEPTS.map(d=>{const on=exp.depts.includes(d.k);return <button key={d.k} onClick={()=>setExp(e=>({...e,depts:on?e.depts.filter(x=>x!==d.k):[...e.depts,d.k]}))} style={{padding:"8px 12px",borderRadius:8,border:`1px solid ${on?c.accent:c.line2}`,background:on?c.accentSoft:c.bg2,color:on?c.accent:c.t1,fontFamily:UI,fontSize:13,fontWeight:650,cursor:"pointer"}}>{d.label}</button>;})}</div>
@@ -3588,7 +3624,7 @@ export default function App(){
             <Btn kind="primary" size={13} onClick={doPrint}><Printer size={16}/>Print / Save as PDF</Btn>
           </div>
           <div data-noprint style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,maxWidth:640,marginBottom:14}}>{desc}</div>
-          {exp.mode==="full"?<ExportDoc project={project}/>:exp.mode==="gear"?<GearSheet project={project} depts={exp.depts} by={exp.gearBy}/>:<SidesDoc project={project} dayFilter={dayVal}/>}
+          {exp.mode==="full"?<ExportDoc project={project}/>:exp.mode==="gear"?<GearSheet project={project} depts={exp.depts} by={exp.gearBy}/>:exp.mode==="sides"?<SidesDoc project={project} dayFilter={dayVal}/>:<TimeOfDaySheet project={project}/>}
           </div>;
         })()}
         {view==="import"&&<Import project={project} setProject={setProject} onToast={toastFn}/>}
