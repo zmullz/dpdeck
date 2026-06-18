@@ -104,7 +104,9 @@ const TOD_ANCHORS=[
   {k:"sunset",label:"Sunset"},
   {k:"sunrise",label:"Sunrise"},
   {k:"daylight",label:"Any daylight"},
-  {k:"under",label:"Avoid harsh sun"},
+  {k:"under",label:"Avoid harsh sunlight"},
+  {k:"under-am",label:"Avoid harsh sunlight: AM"},
+  {k:"under-pm",label:"Avoid harsh sunlight: PM"},
 ];
 const todAnchorLabel=k=>{const a=TOD_ANCHORS.find(x=>x.k===k);return a?a.label:"";};
 // Returns null when there is no anchor (nothing to compute). Otherwise {ok, win, why?, extra?}:
@@ -125,10 +127,19 @@ function solveTodWindow(anchor,deg,lat,lng,ymd,tz){
     case "sunrise":return ok(t.sunrise)?{ok:true,win:F(t.sunrise)}:noSun;
     case "sunset":return ok(t.sunset)?{ok:true,win:F(t.sunset)}:noSun;
     case "daylight":return ok(t.sunrise)&&ok(t.sunset)?{ok:true,win:`${F(t.sunrise)}-${F(t.sunset)}`}:noSun;
-    case "under":{
+    case "under": case "under-am": case "under-pm":{
       if(!ok(t.sunrise)||!ok(t.sunset))return noSun;
       let D=(deg===""||deg==null)?40:Number(deg);if(!isFinite(D))D=40;D=Math.max(0,Math.min(90,D));  // empty -> the 40deg default; an explicit value (incl 0) is honored; clamp to a real elevation
       const hw=sunAboveWindow(dayNoonUTC(ymd),+lat,+lng,D);
+      const noon=ok(t.noon)?t.noon:null;
+      if(anchor==="under-am"){  // morning soft window: sunrise up to when the sun first tops N deg
+        if(hw&&ok(hw.start))return {ok:true,win:`${F(t.sunrise)}-${F(hw.start)}`,extra:`before harsh (sun tops ${D}° at ${F(hw.start)})`};
+        return {ok:true,win:`${F(t.sunrise)}-${F(noon||t.sunset)}`,extra:`sun never tops ${D}° today`};
+      }
+      if(anchor==="under-pm"){  // afternoon soft window: after the sun drops back below N deg, to sunset
+        if(hw&&ok(hw.end))return {ok:true,win:`${F(hw.end)}-${F(t.sunset)}`,extra:`after harsh (sun back below ${D}° at ${F(hw.end)})`};
+        return {ok:true,win:`${F(noon||t.sunrise)}-${F(t.sunset)}`,extra:`sun never tops ${D}° today`};
+      }
       if(!hw||!ok(hw.start)||!ok(hw.end))return {ok:true,win:`all day is soft (${F(t.sunrise)}-${F(t.sunset)})`,extra:`sun never tops ${D}°`};
       return {ok:true,win:`before ${F(hw.start)}, after ${F(hw.end)}`,extra:`harsh above ${D}°: ${F(hw.start)}-${F(hw.end)}`};
     }
@@ -1752,7 +1763,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
             <option value="">No sun anchor</option>
             {TOD_ANCHORS.map(a=><option key={a.k} value={a.k}>{a.label}</option>)}
           </select>
-          {scene.todSun==="under"&&<div style={{display:"flex",alignItems:"center",gap:5}}>
+          {(scene.todSun||"").startsWith("under")&&<div style={{display:"flex",alignItems:"center",gap:5}}>
             <span style={{fontFamily:UI,fontSize:12,color:c.t2}}>sun below</span>
             <TextInput type="number" min="0" max="90" value={scene.todDeg??""} placeholder="40" onChange={e=>patchScene({todDeg:e.target.value})} style={{width:62}}/>
             <span style={{fontFamily:UI,fontSize:12,color:c.t2}}>°</span>
