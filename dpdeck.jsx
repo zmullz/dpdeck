@@ -90,6 +90,51 @@ function sunAboveWindow(date,lat,lng,deg){
   const Js=setJ(h,lw,phi,d,n,M,L);if(isNaN(Js))return null;
   return {start:fromJulian(Jn-(Js-Jn)),end:fromJulian(Js)};
 }
+// Time-of-day anchors. The INTENT (a sun condition, pinned to the sun's height) is what gets stored
+// on a scene; the actual clock window is DERIVED here from the scene's CURRENT shoot date + location,
+// so it moves with the schedule (a scene pushed to a later day recomputes to that day's sun times) and
+// is never a hardcoded clock time. Definitions match the app's own sun panel (Golden AM = sunrise to
+// the 6-deg point, Golden PM = the 6-deg point to sunset, Blue = the civil-twilight edge, harsh = the
+// sun-above-N-deg window from sunAboveWindow), so the readouts agree everywhere.
+const TOD_ANCHORS=[
+  {k:"golden-pm",label:"Golden hour (PM)"},
+  {k:"golden-am",label:"Golden hour (AM)"},
+  {k:"blue-pm",label:"Blue hour (PM)"},
+  {k:"blue-am",label:"Blue hour (AM)"},
+  {k:"sunset",label:"Sunset"},
+  {k:"sunrise",label:"Sunrise"},
+  {k:"daylight",label:"Any daylight"},
+  {k:"under",label:"Avoid harsh sun"},
+];
+const todAnchorLabel=k=>{const a=TOD_ANCHORS.find(x=>x.k===k);return a?a.label:"";};
+// Returns null when there is no anchor (nothing to compute). Otherwise {ok, win, why?, extra?}:
+// ok+win = the derived clock window for that date/location; !ok+why = an HONEST reason it cannot be
+// computed yet (no GPS, not scheduled, sun never reaches that height) - never a fabricated time.
+function solveTodWindow(anchor,deg,lat,lng,ymd,tz){
+  if(!anchor)return null;
+  if(lat==null||lat===""||lng==null||lng==="")return {ok:false,why:"add a location with GPS to compute times"};
+  if(!ymd)return {ok:false,why:"not scheduled yet, times appear once it has a shoot day"};
+  let t;try{t=sunTimes(dayNoonUTC(ymd),+lat,+lng);}catch{return {ok:false,why:"sun data unavailable"};}
+  const F=d=>fmtT(d,tz),ok=d=>d&&!isNaN(d);
+  const noSun={ok:false,why:"sun stays below this height all day on the shoot date"};
+  switch(anchor){
+    case "golden-am":return ok(t.sunrise)&&ok(t.goldEnd)?{ok:true,win:`${F(t.sunrise)}-${F(t.goldEnd)}`}:noSun;
+    case "golden-pm":return ok(t.goldStart)&&ok(t.sunset)?{ok:true,win:`${F(t.goldStart)}-${F(t.sunset)}`}:noSun;
+    case "blue-am":return ok(t.dawn)&&ok(t.sunrise)?{ok:true,win:`${F(t.dawn)}-${F(t.sunrise)}`}:noSun;
+    case "blue-pm":return ok(t.sunset)&&ok(t.dusk)?{ok:true,win:`${F(t.sunset)}-${F(t.dusk)}`}:noSun;
+    case "sunrise":return ok(t.sunrise)?{ok:true,win:F(t.sunrise)}:noSun;
+    case "sunset":return ok(t.sunset)?{ok:true,win:F(t.sunset)}:noSun;
+    case "daylight":return ok(t.sunrise)&&ok(t.sunset)?{ok:true,win:`${F(t.sunrise)}-${F(t.sunset)}`}:noSun;
+    case "under":{
+      if(!ok(t.sunrise)||!ok(t.sunset))return noSun;
+      let D=(deg===""||deg==null)?40:Number(deg);if(!isFinite(D))D=40;D=Math.max(0,Math.min(90,D));  // empty -> the 40deg default; an explicit value (incl 0) is honored; clamp to a real elevation
+      const hw=sunAboveWindow(dayNoonUTC(ymd),+lat,+lng,D);
+      if(!hw||!ok(hw.start)||!ok(hw.end))return {ok:true,win:`all day is soft (${F(t.sunrise)}-${F(t.sunset)})`,extra:`sun never tops ${D}°`};
+      return {ok:true,win:`before ${F(hw.start)}, after ${F(hw.end)}`,extra:`harsh above ${D}°: ${F(hw.start)}-${F(hw.end)}`};
+    }
+  }
+  return null;
+}
 // ShadeMap deep link: exact 3D shadows for this location at solar noon on the shoot date.
 // URL format read from shademap.app's live bundle: /@lat,lng,Zz,MILLISt,0b,0p,0m (t = epoch ms).
 function shadeMapUrl(lat,lng,ymd){
@@ -371,8 +416,12 @@ const R2_BASE="https://files-worker.me-e51.workers.dev";
    user's key (entered once per device in Settings, stored locally, never in the repo), so
    cloud pull/push works privately without making the film publicly readable. */
 let R2_KEY="";
-async function loadR2Key(){try{R2_KEY=(await store.get("pb:r2key"))||"";}catch{R2_KEY="";}}
-function setR2Key(k){R2_KEY=(k||"").trim();return store.set("pb:r2key",R2_KEY);}
+// Cloud sync is HARD-DISABLED on a local dev host (localhost / 127.0.0.1 / ::1), even if a key is stored,
+// so running `npm run dev` can never read, push, or merge against the production deck. Local IndexedDB and
+// every feature still work; only the cloud round-trip is off. The live site (a real domain) is unaffected.
+const DEV_HOST=(()=>{try{return /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/.test(location.hostname);}catch{return false;}})();
+async function loadR2Key(){try{R2_KEY=DEV_HOST?"":((await store.get("pb:r2key"))||"");}catch{R2_KEY="";}}
+function setR2Key(k){const v=(k||"").trim();R2_KEY=DEV_HOST?"":v;return store.set("pb:r2key",v);}
 const r2Headers=()=>R2_KEY?{"X-API-Key":R2_KEY}:undefined;
 const R2_KEYS={script:"dpdeck/script.json",schedule:"dpdeck/schedule.json",locations:"dpdeck/locations.json",crew:"dpdeck/crew.json",contacts:"dpdeck/contacts.json"};
 const DECK_KEY="dpdeck/_deck.json"; // full lossless deck snapshot for cross-device sync
@@ -466,7 +515,7 @@ function mergeScene(base,ours,theirs){
   o.sketches=merge3List(base&&base.sketches,ours.sketches,theirs.sketches,x=>x);
   o.gearTags=merge3List(base&&base.gearTags,ours.gearTags,theirs.gearTags,x=>x);
   o.aiGear=merge3List(base&&base.aiGear,ours.aiGear,theirs.aiGear,x=>x.text);
-  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod"])
+  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod","todSun","todDeg"])
     o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
   o._mt=Math.max(om,tm);
   return o;
@@ -643,7 +692,7 @@ function extractJSON(raw){
   if(a<0||b<0)throw new Error("Could not read a scene list from the response.");
   return JSON.parse(s.slice(a,b+1));
 }
-function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",tod:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
+function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",tod:"",todSun:"",todDeg:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
 /* Scene length in eighths of a page -> the film-standard "N M/8" label (19 -> "2 3/8", 3 -> "3/8"). */
 const fmtEighths=e=>{e=+e||0;if(!e)return "";const w=Math.floor(e/8),f=e%8;return w?(f?`${w} ${f}/8`:`${w}`):`${f}/8`;};
 const dayEighths=scenes=>scenes.reduce((n,s)=>n+(+s.eighths||0),0);
@@ -713,7 +762,7 @@ function applySchedule(existing,days){
   // first day a scene appears wins its per-scene badge (a scene split across days still lists on each
   // day in the Days view, which reads days[] directly; the badge just shows the primary/first day).
   days.forEach(d=>(d.scenes||[]).forEach((num,i)=>{const k=numKey(num);if(!asn.has(k))asn.set(k,{day:String(d.day||""),order:i+1,date:d.date||""});}));
-  return existing.map(s=>{const a=asn.get(numKey(s.number));return a?{...s,shootDay:a.day,shootOrder:a.order,shootDate:a.date||s.shootDate||""}:{...s,shootDay:"",shootOrder:0};});
+  return existing.map(s=>{const a=asn.get(numKey(s.number));return a?{...s,shootDay:a.day,shootOrder:a.order,shootDate:a.date||s.shootDate||""}:{...s,shootDay:"",shootOrder:0,shootDate:""};});  // unscheduled -> clear shootDate too, so sun/weather/time-of-day never compute off a stale day
 }
 function diffSchedule(existing,days){
   const asn=new Map();days.forEach(d=>(d.scenes||[]).forEach(num=>asn.set(numKey(num),String(d.day||""))));
@@ -1670,8 +1719,26 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
       </div>
       <div>
         <Label style={{marginBottom:6}}>Time of day</Label>
-        <TextArea value={scene.tod||""} placeholder="Ideal window to shoot, e.g. golden hour 18:00-19:30, or avoid harsh midday" onChange={e=>patchScene({tod:e.target.value})} style={{minHeight:54}}/>
-        <div style={{fontFamily:UI,fontSize:11.5,color:c.t2,marginTop:5,lineHeight:1.4}}>The ideal shooting window for this scene. Exports to the AD as a Time of day PDF.</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <select value={scene.todSun||""} onChange={e=>patchScene({todSun:e.target.value})} style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${c.line2}`,background:c.bg2,color:c.t0,fontFamily:UI,fontSize:13,fontWeight:600}}>
+            <option value="">No sun anchor</option>
+            {TOD_ANCHORS.map(a=><option key={a.k} value={a.k}>{a.label}</option>)}
+          </select>
+          {scene.todSun==="under"&&<div style={{display:"flex",alignItems:"center",gap:5}}>
+            <span style={{fontFamily:UI,fontSize:12,color:c.t2}}>sun below</span>
+            <TextInput type="number" min="0" max="90" value={scene.todDeg??""} placeholder="40" onChange={e=>patchScene({todDeg:e.target.value})} style={{width:62}}/>
+            <span style={{fontFamily:UI,fontSize:12,color:c.t2}}>°</span>
+          </div>}
+        </div>
+        {(()=>{const w=solveTodWindow(scene.todSun,scene.todDeg,loc&&loc.lat,loc&&loc.lng,scene.shootDate,meta.tz);if(!w)return null;
+          return <div style={{fontFamily:UI,fontSize:12,marginTop:7,lineHeight:1.45,padding:"7px 10px",borderRadius:8,background:c.bg2,border:`1px solid ${c.line2}`}}>
+            {w.ok
+              ? <span style={{color:c.t1}}>{scene.shootDate?`${scene.shootDate} · `:""}{todAnchorLabel(scene.todSun)}: <b style={{color:c.t0}}>{w.win}</b>{w.extra?` (${w.extra})`:""}</span>
+              : <span style={{color:c.t2}}>{todAnchorLabel(scene.todSun)}: {w.why}</span>}
+            <span style={{color:c.t2}}> · recomputes from the sun if the schedule moves this scene</span>
+          </div>;})()}
+        <TextArea value={scene.tod||""} placeholder="Notes on the light: backlight, soft window, practicals on…" onChange={e=>patchScene({tod:e.target.value})} style={{minHeight:48,marginTop:8}}/>
+        <div style={{fontFamily:UI,fontSize:11.5,color:c.t2,marginTop:5,lineHeight:1.4}}>Pick a sun anchor and the clock window is computed for this scene's shoot date and location. Exports to the AD as a Time of day PDF.</div>
       </div>
       <ShotList scene={scene} patchScene={patchScene}/>
       <GearBlock scene={scene} gearList={gearList} addGear={addGear} patchScene={patchScene}/>
@@ -3090,28 +3157,34 @@ function GearSheet({project,depts,by="dept"}){
    For the AD to schedule scenes against the sun. Only scenes that have a time-of-day note appear. */
 function TimeOfDaySheet({project}){
   const P={text:"#161616",muted:"#6a6a6a",line:"#dcdcdc",accent:"#8a5a00"};
-  const scenes=project.scenes.filter(s=>s.status!=="omitted"&&(s.tod||"").trim()).sort((a,b)=>{
+  const m=project.meta;
+  const locById=id=>project.locations.find(l=>l.id===id);
+  const scenes=project.scenes.filter(s=>s.status!=="omitted"&&(s.todSun||(s.tod||"").trim())).sort((a,b)=>{
     const ad=a.shootDay?0:1,bd=b.shootDay?0:1;if(ad!==bd)return ad-bd;
     if(a.shootDay&&b.shootDay){const cc=cmpNum(a.shootDay,b.shootDay);if(cc)return cc;const o=(+a.shootOrder||0)-(+b.shootOrder||0);if(o)return o;}
     return cmpNum(a.number,b.number);
   });
   const head=<div style={{marginBottom:24}}>
     <div style={{fontFamily:UI,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:P.muted,fontWeight:700,marginBottom:8}}>Time of day</div>
-    <div style={{fontFamily:SERIF,fontSize:32,fontWeight:700,lineHeight:1.1}}>{project.meta.title||"Untitled Film"}</div>
-    <div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:4}}>Ideal shooting window per scene · {scenes.length} scene{scenes.length===1?"":"s"} noted · Generated {new Date().toLocaleDateString(undefined,{year:"numeric",month:"long",day:"numeric"})}</div>
+    <div style={{fontFamily:SERIF,fontSize:32,fontWeight:700,lineHeight:1.1}}>{m.title||"Untitled Film"}</div>
+    <div style={{fontFamily:UI,fontSize:12,color:P.muted,marginTop:4}}>Ideal shooting window per scene, computed from the sun for each scene's shoot date · {scenes.length} scene{scenes.length===1?"":"s"} noted · Generated {new Date().toLocaleDateString(undefined,{year:"numeric",month:"long",day:"numeric"})}</div>
   </div>;
   return <div id="print-doc" style={{maxWidth:840,margin:"0 auto",background:"#fff",color:P.text,padding:"40px 44px",fontFamily:UI,boxShadow:"0 0 0 1px #00000010"}}>
     {head}
-    {scenes.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>No time-of-day notes yet. Open a scene, add an ideal shooting window in the Time of day field, and it will appear here.</div>:
+    {scenes.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:P.muted}}>No time-of-day notes yet. Open a scene, pick a sun anchor (or add a note) in the Time of day field, and it will appear here.</div>:
       <table style={{width:"100%",borderCollapse:"collapse"}}><tbody>
-        {scenes.map(s=><tr key={s.number} className="pd-row" style={{borderBottom:`1px solid ${P.line}`}}>
+        {scenes.map(s=>{const l=locById(s.locationId);const w=solveTodWindow(s.todSun,s.todDeg,l&&l.lat,l&&l.lng,s.shootDate,m.tz);return <tr key={s.number} className="pd-row" style={{borderBottom:`1px solid ${P.line}`}}>
           <td style={{padding:"9px 8px",fontFamily:MONO,fontSize:14,fontWeight:700,color:P.accent,verticalAlign:"top",width:62,whiteSpace:"nowrap"}}>{s.number}</td>
-          <td style={{padding:"9px 8px",verticalAlign:"top",width:"38%"}}>
+          <td style={{padding:"9px 8px",verticalAlign:"top",width:"34%"}}>
             <div style={{fontFamily:UI,fontSize:13,fontWeight:700,lineHeight:1.3}}>{s.slug} {s.set}</div>
-            <div style={{fontFamily:MONO,fontSize:10.5,color:P.muted,marginTop:2}}>{[s.dayNight,s.shootDay?`Day ${s.shootDay}`:"",s.storyDay?`Story ${s.storyDay}`:""].filter(Boolean).join(" · ")||"unscheduled"}</div>
+            <div style={{fontFamily:MONO,fontSize:10.5,color:P.muted,marginTop:2}}>{[s.dayNight,s.shootDay?`Day ${s.shootDay}`:"",s.shootDate||"",l?l.name:""].filter(Boolean).join(" · ")||"unscheduled"}</div>
           </td>
-          <td style={{padding:"9px 8px",fontFamily:UI,fontSize:13,color:P.text,verticalAlign:"top",whiteSpace:"pre-wrap",lineHeight:1.45}}>{s.tod}</td>
-        </tr>)}
+          <td style={{padding:"9px 8px",fontFamily:UI,fontSize:13,color:P.text,verticalAlign:"top",lineHeight:1.45}}>
+            {w&&<div style={{fontWeight:700}}>{todAnchorLabel(s.todSun)}{w.ok?`: ${w.win}`:""}{w.ok&&w.extra?<span style={{fontWeight:400,color:P.muted}}> ({w.extra})</span>:""}</div>}
+            {w&&!w.ok&&<div style={{fontSize:11.5,color:P.muted}}>{w.why}</div>}
+            {(s.tod||"").trim()&&<div style={{whiteSpace:"pre-wrap",color:w?P.muted:P.text,marginTop:w?3:0,fontSize:w?12:13}}>{s.tod}</div>}
+          </td>
+        </tr>;})}
       </tbody></table>}
   </div>;
 }
@@ -3222,7 +3295,11 @@ function SidesDoc({project,dayFilter}){
           {s.syn&&<div style={{fontFamily:SERIF,fontSize:13,lineHeight:1.5,marginTop:6}}>{s.syn}</div>}
           {s.scriptText&&<div style={{marginTop:6}}><span style={sub}>Script</span><div style={{marginTop:3}}><ScreenplayText text={s.scriptText} base={P.text} strong={P.text} dim={P.muted} size={10}/></div></div>}
           {s.notes&&<div style={{marginTop:6}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
-          {(s.tod||"").trim()&&<div style={{marginTop:6}}><span style={sub}>Time of day</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.tod}</div></div>}
+          {(()=>{const w=solveTodWindow(s.todSun,s.todDeg,l&&l.lat,l&&l.lng,day.date,m.tz);if(!w&&!(s.tod||"").trim())return null;return <div style={{marginTop:6}}><span style={sub}>Time of day</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3}}>
+            {w&&w.ok&&<div style={{fontWeight:700}}>{todAnchorLabel(s.todSun)}: {w.win}{w.extra?<span style={{fontWeight:400,color:P.muted}}> ({w.extra})</span>:""}</div>}
+            {w&&!w.ok&&<div style={{color:P.muted}}>{todAnchorLabel(s.todSun)}: {w.why}</div>}
+            {(s.tod||"").trim()&&<div style={{whiteSpace:"pre-wrap",color:w?P.muted:P.text,marginTop:w?2:0}}>{s.tod}</div>}
+          </div></div>;})()}
           {s.shots.length>0&&<div style={{marginTop:6}}><span style={sub}>Shots</span><div style={{marginTop:3}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12,lineHeight:1.5,display:"flex",gap:7}}><span style={{color:P.muted,fontFamily:MONO,fontSize:10,minWidth:16}}>{i+1}.</span><span>{sh.text}</span></div>)}</div></div>}
           {g.length>0&&<div style={{marginTop:6}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const di=g.filter(x=>x.dept===d.k);return di.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {di.map(x=>x.name).join(", ")}</div>:null;})}</div></div>}
           {s.refs.length>0&&<div style={{marginTop:6}}><span style={sub}>Reference</span>{imgRow(s.refs,110)}</div>}
