@@ -853,7 +853,7 @@ const docs={script:{doc:null,name:"",pageCache:new Map()},schedule:{doc:null,nam
 const scriptDoc=docs.script;
 const DOC_LABEL={script:"Script",schedule:"Schedule"};
 function abToB64(ab){const b=new Uint8Array(ab);let bin="";const CH=0x8000;for(let i=0;i<b.length;i+=CH)bin+=String.fromCharCode.apply(null,b.subarray(i,i+CH));return btoa(bin);}
-function b64ToU8(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}
+function b64ToU8(b64){if(typeof b64==="string"&&b64.startsWith("data:")){const c=b64.indexOf(",");if(c>=0)b64=b64.slice(c+1);}const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}// tolerate a stray data:...;base64, prefix (a server-side doc embed) so pb:doc:* always decodes
 async function saveDoc(slot,ab,name){
   // Persist bytes first so the document survives + syncs even if pdf.js parsing hiccups.
   try{await store.set("pb:doc:"+slot,abToB64(ab));await store.set("pb:doc:"+slot+"name",name||"");}catch{}
