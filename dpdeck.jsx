@@ -590,6 +590,7 @@ let pushLock=Promise.resolve();                              // serialize ALL pu
 // forcePushDeck() (Settings -> "Force push"), which sets forceNextPush for exactly one push.
 let forceNextPush=false;
 const SHRINK_GUARD_FRAC=0.6, SHRINK_GUARD_MIN=5;
+const crewCount=p=>Object.values((p&&p.crew)||{}).reduce((n,a)=>n+(Array.isArray(a)?a.length:0),0); // total crew across all departments, for the shrink guard
 async function forcePushDeck(){forceNextPush=true;try{const r=await pushDeckToCloud();await store.del("pb:sync_blocked");return r;}finally{forceNextPush=false;}}
 function pushDeckToCloud(){const run=pushLock.then(()=>_pushDeckToCloud(0),()=>_pushDeckToCloud(0));pushLock=run.catch(()=>{});return run;}
 async function _pushDeckToCloud(depth,carryBase,carryOurs){
@@ -599,12 +600,13 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
   const ours=(carryOurs!==undefined)?carryOurs:await exportFullBackup();                         // our local edits, captured ONCE (never re-diffed against a prior merge)
   const meta=await remoteDeckMeta();
   const localSynced=(await store.get("pb:synced_ts"))||0,remoteTs=(meta&&meta.ts)||0;
-  let merged=false,pushDeck=ours,theirsScenes=0;
+  let merged=false,pushDeck=ours,theirsScenes=0,theirsLocs=0,theirsCrew=0;
   if(remoteTs>localSynced){                                  // cloud is ahead -> MUST merge; a throw here must NOT fall through to an overwrite
     const t=await r2ReadRaw(DECK_KEY);                        // (throws on a transient read error -> propagates; never plain-overwrites unseen edits)
     if(t){
       const theirs=JSON.parse(t);
-      theirsScenes=(((theirs.data||{})["pb:project"]||{}).scenes||[]).length;
+      const tp=(theirs.data||{})["pb:project"]||{};
+      theirsScenes=(tp.scenes||[]).length;theirsLocs=(tp.locations||[]).length;theirsCrew=crewCount(tp);
       const m=mergeDecks(base,ours,theirs);
       merged=true;
       if(jeq(m.data["pb:project"],theirs.data["pb:project"])){ // we contributed nothing -> adopt remote, no push (prevents sync ping-pong)
@@ -615,13 +617,23 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
       pushDeck=m;                                             // do NOT adopt locally yet — only after the write commits (so base_snapshot can't poison a CAS retry)
     }
   }
-  // Mass-deletion guard: never auto-write a deck far smaller (in scenes) than the last known cloud/base.
-  const priorScenes=Math.max((base&&Array.isArray(base.scenes))?base.scenes.length:0,theirsScenes);
-  const newScenes=(((pushDeck.data||{})["pb:project"]||{}).scenes||[]).length;
-  if(!forceNextPush&&priorScenes>0&&newScenes<priorScenes*SHRINK_GUARD_FRAC&&(priorScenes-newScenes)>=SHRINK_GUARD_MIN){
-    await store.set("pb:sync_blocked",{prior:priorScenes,next:newScenes,at:Date.now()});
-    const err=new Error("Cloud sync paused: this device has "+newScenes+" scenes but the cloud has "+priorScenes+". Held to protect the cloud deck. Pull the cloud copy, or force-push in Settings if this is intended.");
-    err.code="SYNC_SHRINK_GUARD";err.guard={prior:priorScenes,next:newScenes};
+  // Mass-deletion guard: never auto-write a deck that drops a large share of ANY major collection
+  // (scenes / locations / crew) vs the last known cloud/base, and never push an empty deck once we had one.
+  const P=(pushDeck.data||{})["pb:project"]||{};
+  const newC={scenes:(P.scenes||[]).length,locations:(P.locations||[]).length,crew:crewCount(P)};
+  const baseC={scenes:(base&&Array.isArray(base.scenes))?base.scenes.length:0,locations:(base&&Array.isArray(base.locations))?base.locations.length:0,crew:crewCount(base)};
+  const priorC={scenes:Math.max(baseC.scenes,theirsScenes),locations:Math.max(baseC.locations,theirsLocs),crew:Math.max(baseC.crew,theirsCrew)};
+  let blocked=null;
+  if(!forceNextPush){
+    if(newC.scenes===0&&(localSynced>0||priorC.scenes>0))blocked={kind:"scenes",prior:priorC.scenes,next:0};  // never push an empty deck once a real deck was ever synced
+    else for(const k of ["scenes","locations","crew"]){
+      if(priorC[k]>0&&newC[k]<priorC[k]*SHRINK_GUARD_FRAC&&(priorC[k]-newC[k])>=SHRINK_GUARD_MIN){blocked={kind:k,prior:priorC[k],next:newC[k]};break;}
+    }
+  }
+  if(blocked){
+    await store.set("pb:sync_blocked",{...blocked,at:Date.now()});
+    const err=new Error("Cloud sync paused: this device has "+blocked.next+" "+blocked.kind+" but the cloud has "+blocked.prior+". Held to protect the cloud deck. Pull the cloud copy, or force-push in Settings if this is intended.");
+    err.code="SYNC_SHRINK_GUARD";err.guard=blocked;
     throw err;
   }
   pushDeck.ts=Math.max(pushDeck.ts||Date.now(),localSynced+1,remoteTs+1);   // monotonic ts — immune to device clock skew
@@ -640,6 +652,9 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
 async function pullDeckFromCloud(){
   if(!R2_KEY)throw new Error("Add your Files Worker key in Settings first.");
   const t=await r2ReadRaw(DECK_KEY);if(!t)throw new Error("No cloud deck yet. Push from another device first.");
+  // Snapshot THIS device's current deck before a pull overwrites it, so a bad/rolled-back cloud pull is
+  // always recoverable to what this device had a moment ago (the exact recovery missing in the incident).
+  try{const cur=await store.get("pb:project");if(cur&&(cur.scenes||[]).length)await writeSnapshotNow("before-pull-"+Date.now(),"Before cloud pull "+new Date().toLocaleString());}catch{}
   const o=JSON.parse(t);await importFullBackup(o);
   await store.set("pb:synced_ts",o.ts||Date.now());await store.set("pb:project_mtime",o.ts||Date.now());
   await store.set("pb:base_snapshot",await store.get("pb:project"));
@@ -2714,7 +2729,8 @@ function ImportPane({kind,project,setProject,onToast}){
     catch(e){setErr("Cloud read failed ("+(e.message||"?")+"). Check the worker's CORS and read access.");}
     setBusy(false);setProg("");
   };
-  const apply=()=>{
+  const apply=async()=>{
+    try{if(R2_KEY)await writeSnapshotNow("before-import-"+Date.now(),"Before import "+new Date().toLocaleString());}catch{}  // rollback point before an import changes the deck
     if(review.kind==="script"){setProject(p=>{let sc=attachRefs(applyScript(p.scenes,review.parsed),review.parsed);sc=linkLocations(sc,review.parsed,p.locations);const d=deriveLocations(sc,p.locations);return {...p,scenes:d.scenes,locations:d.locations};});onToast(`Script merged · ${review.diff.added.length} new, ${review.diff.omitted.length} cut`);}
     else{setProject(p=>({...p,days:review.days,scenes:applySchedule(p.scenes,review.days)}));onToast(`Schedule applied · ${review.diff.days} days`);}
     setReview(null);
@@ -2903,6 +2919,7 @@ function ProjectImportPane({project,setProject,onToast}){
   };
   const apply=async()=>{
     if(!data)return;setBusy(true);setErr("");
+    try{if(R2_KEY)await writeSnapshotNow("before-import-"+Date.now(),"Before project import "+new Date().toLocaleString());}catch{}  // rollback point before a full-project import
     try{
       await ensureImageHashIndex(); // so re-imports reuse existing image ids instead of duplicating
       const incScenes=(data.scenes||[]).map(s=>({...s,refs:[...(s.refs||[])]}));
@@ -2967,7 +2984,7 @@ function SettingsView({project,setProject,onToast,onThemeChange,onNav}){
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     {blocked&&R2_KEY&&<div style={{background:c.bg1,border:`1px solid ${c.warn||"#d98a3d"}`,borderRadius:13,padding:15}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><AlertTriangle size={16} color={c.warn||"#d98a3d"}/><Label style={{color:c.warn||"#d98a3d"}}>Cloud sync paused</Label></div>
-      <div style={{fontFamily:UI,fontSize:13,color:c.t1,lineHeight:1.5,marginBottom:12}}>This device has <b>{blocked.next}</b> scene{blocked.next===1?"":"s"} but the cloud has <b>{blocked.prior}</b>. To protect the cloud deck, the sync was held instead of overwriting it. Almost always you want to <b>pull the cloud copy</b>. Only force-push if this device is deliberately the new source of truth.</div>
+      <div style={{fontFamily:UI,fontSize:13,color:c.t1,lineHeight:1.5,marginBottom:12}}>This device has <b>{blocked.next}</b> {blocked.kind||"scenes"} but the cloud has <b>{blocked.prior}</b>. To protect the cloud deck, the sync was held instead of overwriting it. Almost always you want to <b>pull the cloud copy</b>. Only force-push if this device is deliberately the new source of truth.</div>
       <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
         <Btn kind="primary" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("pull");try{await pullDeckFromCloud();await store.del("pb:sync_blocked");onToast("Pulled the cloud copy. Reloading…");setTimeout(()=>location.reload(),800);}catch(e){onToast("Pull failed: "+(e.message||""));setSyncing("");}}}><CloudDownload size={15}/>{syncing==="pull"?"Pulling…":"Pull cloud copy (recommended)"}</Btn>
         <Btn kind="danger" size={12} disabled={!!syncing} onClick={async()=>{if(!window.confirm(`Force-push this device's ${blocked.next}-scene deck and OVERWRITE the cloud's ${blocked.prior}-scene deck? A snapshot of the cloud is saved first, so it is reversible from Version history.`))return;setSyncing("force");try{await writeSnapshotNow("before-force-push-"+Date.now(),"Before force push "+todayISO());await forcePushDeck();setBlocked(null);onToast("Forced this device's deck to the cloud.");}catch(e){onToast("Force push failed: "+(e.message||""));}setSyncing("");}}><Upload size={15}/>{syncing==="force"?"Pushing…":"Force push this device"}</Btn>
@@ -3595,9 +3612,9 @@ export default function App(){
       else{stopPoll();flushLocal();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}}
     };
     const onHide=()=>{stopPoll();flushLocal();if(R2_KEY&&dirty.current&&!pulling.current){clearTimeout(pushTimer.current);syncPush().catch(()=>{});}};
-    window.addEventListener("focus",onFocus);document.addEventListener("visibilitychange",onVis);window.addEventListener("pagehide",onHide);
+    window.addEventListener("focus",onFocus);document.addEventListener("visibilitychange",onVis);window.addEventListener("pagehide",onHide);window.addEventListener("beforeunload",flushLocal);
     if(typeof document==="undefined"||document.visibilityState==="visible")startPoll();
-    return()=>{window.removeEventListener("focus",onFocus);document.removeEventListener("visibilitychange",onVis);window.removeEventListener("pagehide",onHide);stopPoll();};
+    return()=>{window.removeEventListener("focus",onFocus);document.removeEventListener("visibilitychange",onVis);window.removeEventListener("pagehide",onHide);window.removeEventListener("beforeunload",flushLocal);stopPoll();};
   },[]);
 
   useEffect(()=>{if(!loaded.current||!project||needReload.current)return;clearTimeout(persistTimer.current);persistTimer.current=setTimeout(()=>{store.set("pb:project",project);mirrorLocal(project);},600);return()=>clearTimeout(persistTimer.current);},[project]);
