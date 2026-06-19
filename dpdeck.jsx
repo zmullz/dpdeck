@@ -403,6 +403,34 @@ async function r2ThumbDataURL(ref){
     return dataUrl;
   }catch{return null;}
 }
+// DURABLE IMAGE BACKUP (additive, never touches the deck): every referenced scene/location image blob
+// (pb:img:<id>) is mirrored to R2 under dpdeck/imgblob/<id>. This is a pure safety copy - it cannot cause
+// data loss, only recovery. If a device ever lacks a blob (wipe, rollback orphan, fresh device), StoredImg
+// fetches it back from here automatically. Throttled; tracks what is already backed up in pb:imgbk.
+const imgBackedUp=new Set(); let imgBkLoaded=false, imgBkBusy=false;
+async function loadImgBackedUp(){if(imgBkLoaded)return;imgBkLoaded=true;try{const a=await store.get("pb:imgbk");if(Array.isArray(a))a.forEach(x=>imgBackedUp.add(x));}catch{}}
+function referencedImgIds(p){const ids=new Set();const add=arr=>{for(const r of arr||[])if(typeof r==="string"&&!isImgUrl(r)&&!isR2Ref(r))ids.add(r);};for(const s of (p&&p.scenes)||[])add(s.refs);for(const l of (p&&p.locations)||[]){add(l.images);add(l.plans);if(l.imgId&&!isImgUrl(l.imgId)&&!isR2Ref(l.imgId))ids.add(l.imgId);}return ids;}
+async function backupSceneImages(){
+  if(!R2_KEY||imgBkBusy)return;imgBkBusy=true;
+  try{
+    await loadImgBackedUp();
+    const p=await store.get("pb:project");if(!p)return;
+    const todo=[...referencedImgIds(p)].filter(id=>!imgBackedUp.has(id));
+    let n=0,changed=false;
+    for(const id of todo){
+      if(n>=24)break;                                          // cap per run; the rest ride the next cycle
+      const v=await store.get("pb:img:"+id);
+      if(typeof v!=="string"){imgBackedUp.add(id);continue;}    // nothing local to back up (already remote or absent)
+      try{await r2Write("dpdeck/imgblob/"+id,v);imgBackedUp.add(id);changed=true;n++;}catch{break;}  // stop on error, retry next cycle
+    }
+    if(changed){try{await store.set("pb:imgbk",[...imgBackedUp]);}catch{}}
+    if(todo.length>n)setTimeout(()=>backupSceneImages(),4000);  // more to do -> continue shortly
+  }finally{imgBkBusy=false;}
+}
+async function fetchImgBackup(id){
+  if(!R2_KEY)return null;
+  try{const res=await fetch(R2_BASE+"/read/"+encodeURIComponent("dpdeck/imgblob/"+id).replace(/%2F/g,"/"),{headers:r2Headers()});if(!res.ok)return null;const t=await res.text();return /^data:/.test(t)?t:null;}catch{return null;}
+}
 function StoredImg({id,style,onClick}){
   const [src,setSrc]=useState(isImgUrl(id)?id:(isR2Ref(id)?null:(imgCache.get(id)||null)));
   useEffect(()=>{let on=true;
@@ -410,7 +438,11 @@ function StoredImg({id,style,onClick}){
     if(isR2Ref(id)){setSrc(null);r2ThumbDataURL(id).then(d=>{if(on)setSrc(d);});return()=>{on=false;};}
     if(imgCache.has(id)){setSrc(imgCache.get(id));return;}
     setSrc(null); // clear stale image when the id changes in place before the new one resolves
-    store.get("pb:img:"+id).then(v=>{if(on&&v){imgCache.set(id,v);setSrc(v);}});
+    store.get("pb:img:"+id).then(v=>{
+      if(on&&v){imgCache.set(id,v);setSrc(v);return;}
+      // local blob missing -> recover it from the R2 backup and re-cache it locally
+      if(on)fetchImgBackup(id).then(d=>{if(on&&d){imgCache.set(id,d);setSrc(d);try{store.set("pb:img:"+id,d);}catch{}}});
+    });
     return()=>{on=false;};
   },[id]);
   // onClick rides the placeholder too, so a tap registers even before the image finishes loading
@@ -647,6 +679,7 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
   try{await store.del("pb:sync_blocked");}catch{}               // a clean write clears any prior shrink-guard block
   try{await writeDailySnapshot(s,pushDeck.ts);}catch{}
   try{await writeShadow(pushDeck.data["pb:project"]);}catch{}    // per-device clobber-proof safety copy (project only)
+  backupSceneImages();                                          // mirror any new referenced image blobs to R2 (fire-and-forget)
   return {len:s.length,merged,pushed:true};
 }
 async function pullDeckFromCloud(){
@@ -3554,6 +3587,7 @@ export default function App(){
       // Push stranded local edits from a previous session right away so they reach the cloud.
       if(hasLocalEdits&&R2_KEY&&!pulling.current){dirty.current=true;syncPush().then(()=>{dirty.current=false;setSync({state:"synced",at:Date.now()});}).catch(()=>{});}
     },60);
+    if(R2_KEY)setTimeout(()=>backupSceneImages(),8000);          // mirror referenced image blobs to R2 a few seconds after load (durable image backup)
   })();},[]);
 
   // Auto-push: debounced cloud sync after local edits (only when a worker key is set).
