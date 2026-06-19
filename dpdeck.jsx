@@ -518,10 +518,11 @@ function mergeText(base,ours,theirs,om,tm){                   // notes: one-side
   return win+"\n(also edited on another device:)\n"+lose;
 }
 const jeq=(x,y)=>JSON.stringify(x===undefined?null:x)===JSON.stringify(y===undefined?null:y);
-function pickField(base,ours,theirs,om,tm){                   // scalars: 3-way, tie -> newest by _mt (ours on equal)
+function pickField(base,ours,theirs,om,tm){                   // scalars: 3-way; newer _mt wins; exact tie -> deterministic by value
   if(jeq(ours,theirs))return ours;
   if(base!==undefined){if(jeq(ours,base))return theirs;if(jeq(theirs,base))return ours;}
-  return tm>om?theirs:ours;
+  if(tm>om)return theirs;if(om>tm)return ours;
+  return JSON.stringify(theirs)>JSON.stringify(ours)?theirs:ours;  // exact _mt tie: pick by value so the merge is symmetric (same winner regardless of which device pushes), no flip-flop on retries
 }
 function pickBulk(base,ours,theirs){                          // images/days/lookNotes: 3-way, no-base -> non-empty / newer remote
   if(jeq(ours,theirs))return ours;
@@ -2707,7 +2708,9 @@ function SceneInfo({open,init,locations,onClose,onSave,onDelete}){
     footer={<>{init&&!init.__new&&<Btn kind="danger" onClick={()=>{onDelete(init.number);onClose();}}><Trash2 size={15}/>Remove</Btn>}<Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="primary" onClick={()=>{onSave(f);onClose();}}>Save</Btn></>}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11}}>
-        <Field label="Scene number"><TextInput value={f.number||""} onChange={e=>set("number",e.target.value)} placeholder="14A"/></Field>
+        <Field label="Scene number">{init?.__new
+          ? <TextInput value={f.number||""} onChange={e=>set("number",e.target.value)} placeholder="14A"/>
+          : <div title="The scene number is the spine that links the script, schedule, photos and sync. It cannot be changed here." style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${c.line2}`,background:c.bg2,color:c.t2,fontFamily:MONO,fontSize:13,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{color:c.t0,fontWeight:700}}>{f.number}</span><span style={{fontSize:10}}>fixed</span></div>}</Field>
         <Field label="Story day"><TextInput value={f.storyDay||""} onChange={e=>set("storyDay",e.target.value)} placeholder="D3"/></Field>
       </div>
       <Field label="Set / location name"><TextInput value={f.set||""} onChange={e=>set("set",e.target.value)} placeholder="BRIDE'S APARTMENT"/></Field>
