@@ -586,6 +586,11 @@ function mergeProjects(base,ours,theirs){
   out.lookNotes=pickBulk(base.lookNotes,ours.lookNotes,theirs.lookNotes);
   out.days=pickBulk(base.days,ours.days,theirs.days);
   out.meta={...theirs.meta,...ours.meta};                    // device-local prefs (theme) stay; title/tz are identical
+  // Integrity: a gearTag must never orphan. If concurrent gear-delete + scene-edit dropped a gear def
+  // that a scene still references, re-attach it from any side so the gear NAME is never lost.
+  const haveGear=new Set((out.gear||[]).map(g=>g&&g.id).filter(Boolean));
+  const needGear=new Set();for(const s of out.scenes||[])for(const t of (s.gearTags||[]))if(t&&!haveGear.has(t))needGear.add(t);
+  if(needGear.size){for(const id of needGear)for(const pool of [ours.gear,theirs.gear,base.gear]){const g=(pool||[]).find(x=>x&&x.id===id);if(g){out.gear=[...(out.gear||[]),g];haveGear.add(id);break;}}}
   return out;
 }
 function refImgIds(p){
