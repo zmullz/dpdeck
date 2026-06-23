@@ -2117,8 +2117,9 @@ function Capture({project,setProject,onFiled,onToast}){
 
 /* DAYS / TODAY — the schedule as the working unit */
 function dayLocation(scenes,locations){for(const s of scenes){const l=locations.find(x=>x.id===s.locationId);if(l&&l.lat!=null&&l.lat!=="")return l;}return null;}
-function DayCard({day,date,scenes,project,onOpen,today}){
+function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
   const loc=dayLocation(scenes,project.locations);
+  const schedPage=(project.days||[]).find(x=>String(x.day)===String(day))?.page||0;  // PDF page for this day, from the embedded schedule
   const gear=useMemo(()=>{const map=Object.fromEntries(DEPTS.map(d=>[d.k,new Set()]));scenes.forEach(s=>s.gearTags.forEach(id=>{const g=project.gear.find(x=>x.id===id);if(g&&map[g.dept])map[g.dept].add(g.name);}));return map;},[scenes,project.gear]);
   const hasGear=DEPTS.some(d=>gear[d.k].size);
   return <div style={{background:c.bg1,border:`1px solid ${today?c.accent:c.line}`,borderRadius:14,overflow:"hidden"}}>
@@ -2128,6 +2129,7 @@ function DayCard({day,date,scenes,project,onOpen,today}){
       {date&&<Val size={13} style={{color:c.t1}}>{new Date(date+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}</Val>}
       <div style={{flex:1}}/>
       <span style={{fontFamily:MONO,fontSize:12,color:c.t2}}>{scenes.length} {scenes.length===1?"scene":"scenes"}{dayEighths(scenes)?` · ${fmtEighths(dayEighths(scenes))} pg`:""}</span>
+      {schedPage>0&&openPdf&&<IconBtn icon={BookOpen} size={16} dim title={`Open the schedule PDF at Day ${day}`} onClick={()=>openPdf({slot:"schedule",start:schedPage,title:`Schedule · Day ${day}`})}/>}
     </div>
     {loc&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`,display:"grid",gridTemplateColumns:"1fr",gap:9}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip><div style={{display:"flex",gap:12,alignItems:"center"}}><WeatherInline lat={loc.lat} lng={loc.lng} date={date}/><TravelChip meta={project.meta} lat={loc.lat} lng={loc.lng}/></div></div>
@@ -2194,8 +2196,9 @@ function CalendarView({project,onOpen}){
     </div>
   </div>;
 }
-function Days({project,onOpen}){
+function Days({project,onOpen,openPdf}){
   const [mode,setMode]=useState("list");
+  const schedLoaded=(project.days||[]).some(d=>d&&d.page>0);
   const present=project.scenes.filter(s=>s.status!=="omitted"&&s.shootDay);
   const days=groupBy([...present].sort((a,b)=>(a.shootOrder||0)-(b.shootOrder||0)),s=>s.shootDay).map(([day,scenes])=>({day,scenes,date:scenes.find(s=>s.shootDate)?.shootDate||""}));
   days.sort((a,b)=>cmpNum(a.day,b.day));
@@ -2204,10 +2207,12 @@ function Days({project,onOpen}){
   const unsched=project.scenes.filter(s=>s.status!=="omitted"&&!s.shootDay).length;
   if(!days.length)return <Empty icon={Calendar} title="No schedule yet" body="Drop the shooting schedule in Import, or feed Claude the call sheet. Your days build themselves, with sun, weather, and a gear rollup each."/>;
   return <div style={{display:"flex",flexDirection:"column",gap:14}}>
-    <div style={{display:"flex",justifyContent:"flex-end"}}><div style={{width:200}}><Segmented value={mode} onChange={v=>setMode(v||"list")} options={[{k:"list",label:"List"},{k:"calendar",label:"Calendar"}]}/></div></div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      {schedLoaded&&openPdf?<Btn kind="ghost" size={12} onClick={()=>openPdf({slot:"schedule",start:1,title:"Schedule PDF"})}><BookOpen size={14}/>Schedule PDF</Btn>:<div/>}
+      <div style={{width:200}}><Segmented value={mode} onChange={v=>setMode(v||"list")} options={[{k:"list",label:"List"},{k:"calendar",label:"Calendar"}]}/></div></div>
     {mode==="calendar"?<CalendarView project={project} onOpen={onOpen}/>:<>
       {todayIdx<0&&<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,display:"flex",alignItems:"center",gap:7}}><Clock size={14}/>No shoot day falls on today ({ti}).</div>}
-      {ordered.map(d=><DayCard key={d.day} {...d} project={project} onOpen={onOpen} today={d.date===ti&&!!ti}/>)}
+      {ordered.map(d=><DayCard key={d.day} {...d} project={project} onOpen={onOpen} openPdf={openPdf} today={d.date===ti&&!!ti}/>)}
       {unsched>0&&<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,textAlign:"center"}}>{unsched} scene{unsched>1?"s":""} not yet on the schedule.</div>}
     </>}
   </div>;
@@ -3311,7 +3316,7 @@ function PrintWeather({lat,lng,date}){
 // Single source of truth for the per-shoot-day list (used by SidesDoc, the export day picker, and weather pre-warm).
 function sidesDays(project){
   let d;
-  if(project.days&&project.days.length)d=project.days.map(x=>({day:String(x.day),date:x.date||"",nums:(x.scenes||[]).map(String)}));
+  if(project.days&&project.days.length)d=project.days.map(x=>{const seen=new Set(),nums=[];for(const n of (x.scenes||[])){const k=numKey(n);if(!seen.has(k)){seen.add(k);nums.push(String(n));}}return {day:String(x.day),date:x.date||"",nums};});  // dedupe within a day: a scene split across strips (124 pt 1/2) maps to one number, must print once per day
   else d=groupBy(project.scenes.filter(s=>s.status!=="omitted"&&String(s.shootDay||"")),s=>String(s.shootDay)).map(([day,sc])=>({day,date:(sc.find(z=>z.shootDate)||{}).shootDate||"",nums:[...sc].sort((a,b)=>(+a.shootOrder||0)-(+b.shootOrder||0)).map(z=>String(z.number))}));
   return d.filter(x=>x.day).sort((a,b)=>cmpNum(a.day,b.day));
 }
@@ -3781,7 +3786,7 @@ export default function App(){
         {view==="scenes"&&<><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}><Btn kind="ghost" size={12} onClick={()=>setInfo({__new:true,status:"todo"})}><Plus size={15}/>Add scene</Btn></div><Library project={project} lens={lens} onOpen={openScene}/></>}
         {view==="look"&&<LookBoard project={project} setProject={setProject} openLightbox={openLightbox} onToast={toastFn}/>}
         {view==="docs"&&<Documents openPdf={openPdf} onToast={toastFn}/>}
-        {view==="days"&&<Days project={project} onOpen={openScene}/>}
+        {view==="days"&&<Days project={project} onOpen={openScene} openPdf={openPdf}/>}
         {view==="locations"&&<Locations project={project} setProject={setProject} onOpen={openScene} openLightbox={openLightbox} onToast={toastFn} focusLoc={focusLoc} onFocused={()=>setFocusLoc(null)} openVf={setVf}/>}
         {view==="crew"&&<Crew project={project} setProject={setProject}/>}
         {view==="gear"&&<Gear project={project} setProject={setProject}/>}
