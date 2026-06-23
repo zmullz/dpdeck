@@ -559,7 +559,7 @@ function mergeScene(base,ours,theirs){
   o.sketches=merge3List(base&&base.sketches,ours.sketches,theirs.sketches,x=>x);
   o.gearTags=merge3List(base&&base.gearTags,ours.gearTags,theirs.gearTags,x=>x);
   o.aiGear=merge3List(base&&base.aiGear,ours.aiGear,theirs.aiGear,x=>x.text);
-  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod","todSun","todDeg"])
+  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","noAutoLoc","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod","todSun","todDeg"])
     o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
   o._mt=Math.max(om,tm);
   return o;
@@ -785,7 +785,7 @@ function extractJSON(raw){
   if(a<0||b<0)throw new Error("Could not read a scene list from the response.");
   return JSON.parse(s.slice(a,b+1));
 }
-function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",notes:"",tod:"",todSun:"",todDeg:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
+function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",noAutoLoc:false,notes:"",tod:"",todSun:"",todDeg:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
 /* Scene length in eighths of a page -> the film-standard "N M/8" label (19 -> "2 3/8", 3 -> "3/8"). */
 const fmtEighths=e=>{e=+e||0;if(!e)return "";const w=Math.floor(e/8),f=e%8;return w?(f?`${w} ${f}/8`:`${w}`):`${f}/8`;};
 const dayEighths=scenes=>scenes.reduce((n,s)=>n+(+s.eighths||0),0);
@@ -915,7 +915,7 @@ function deriveLocations(scenes,locations){
   const byName=new Map(locs.map(l=>[(l.name||"").trim().toLowerCase(),l]));
   let added=0,linked=0;
   const outScenes=(scenes||[]).map(s=>{
-    if(s.locationId||s.status==="omitted")return s;
+    if(s.locationId||s.status==="omitted"||s.noAutoLoc)return s;  // noAutoLoc: an intentional blank (link this scene by hand) is never auto-filled with a generic set-derived location
     const name=((s.loc||"").trim())||canonLocName(s.set);
     if(!name)return s;
     let loc=byName.get(name.toLowerCase());
