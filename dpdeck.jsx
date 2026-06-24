@@ -2275,6 +2275,14 @@ function Dashboard({project,onOpen,onNav}){
   const locGps=locs.filter(l=>l.lat&&l.lng).length;
   const crew=project.crew||{};
   const crewCount=DEPTS.reduce((n,d)=>n+((crew[d.k]||[]).length),0);
+  // Zak's primary key crew for the Home widget: 1st AC, gaffer, key grip, the AD's, and Michal (production).
+  const keyCrew=(()=>{const out=[],seen=new Set();const add=m=>{if(m&&m.name&&!seen.has(m)){seen.add(m);out.push(m);}};
+    add((crew.camera||[]).find(m=>/^1st\s*ac$/i.test((m.role||"").trim())));
+    add((crew.electric||[]).find(m=>/^gaffer$/i.test((m.role||"").trim())));
+    add((crew.grip||[]).find(m=>/key\s*grip/i.test(m.role||"")));
+    for(const ct of (project.contacts||[]))if(/\b[1-3](st|nd|rd)?\s*ad\b/i.test(ct.role||"")||/assistant director/i.test(ct.role||""))add(ct);
+    add((project.contacts||[]).find(ct=>/unit production manager|^production manager/i.test(ct.role||"")||/korynek/i.test(ct.name||"")));
+    return out;})();
   const sc=STATUS.map(st=>({...st,n:present.filter(s=>(s.status||"todo")===st.k).length}));
   const look=(project.look||[]);
   const fmtD=d=>d?new Date(d+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}):"";
@@ -2366,8 +2374,8 @@ function Dashboard({project,onOpen,onNav}){
         {crewCount===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet. Feed Claude the call sheet.</div>:DEPTS.map(d=>(crew[d.k]||[]).length?<div key={d.k} style={{display:"flex",gap:8,marginBottom:6,alignItems:"baseline"}}><span style={{fontFamily:MONO,fontSize:10,color:c.t2,minWidth:64}}>{d.label}</span><span style={{fontFamily:UI,fontSize:12.5,color:c.t1}}>{(crew[d.k]||[]).map(m=>m.name).join(", ")}</span></div>:null)}
       </div>
       <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><Label>Key contacts</Label><button onClick={()=>onNav("contacts")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
-        {(project.contacts||[]).length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet.</div>:project.contacts.slice(0,5).map(ct=><div key={ct.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:7}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ct.name}</div>{ct.role&&<div style={{fontFamily:UI,fontSize:11,color:c.t2}}>{ct.role}</div>}</div><div style={{display:"flex",gap:9,flexShrink:0}}>{ct.phone&&<a href={`tel:${ct.phone}`} style={{color:c.t1}}><Phone size={14}/></a>}{ct.email&&<a href={`mailto:${ct.email}`} style={{color:c.t1}}><Mail size={14}/></a>}</div></div>)}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><Label>Key crew</Label><button onClick={()=>onNav("crew")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
+        {keyCrew.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet.</div>:keyCrew.map(ct=><div key={ct.id||ct.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:7}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ct.name}</div>{ct.role&&<div style={{fontFamily:UI,fontSize:11,color:c.t2}}>{ct.role}</div>}</div><div style={{display:"flex",gap:9,flexShrink:0}}>{ct.phone&&<a href={`tel:${ct.phone}`} style={{color:c.t1}}><Phone size={14}/></a>}{ct.email&&<a href={`mailto:${ct.email}`} style={{color:c.t1}}><Mail size={14}/></a>}</div></div>)}
       </div>
     </div>
   </div>;
