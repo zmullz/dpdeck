@@ -2283,7 +2283,11 @@ function Dashboard({project,onOpen,onNav}){
     add((crew.grip||[]).find(m=>/key\s*grip/i.test(m.role||"")));
     for(const ct of (project.contacts||[]))if(/\b[1-3](st|nd|rd)?\s*ad\b/i.test(ct.role||"")||/assistant director/i.test(ct.role||""))add(ct);
     add((project.contacts||[]).find(ct=>/unit production manager|^production manager/i.test(ct.role||"")||/korynek/i.test(ct.name||"")));
+    add((project.contacts||[]).find(ct=>/production designer/i.test(ct.role||"")));                 // Asia
+    add((project.contacts||[]).find(ct=>/^location manager$/i.test((ct.role||"").trim())));          // Marcin Zajac
     return out;})();
+  // Vendors widget: WFDIF lab (Jarek + the rest of the lab), ARRI camera rental, and Marcin at ATM.
+  const vendorGroups=[["WFDIF Lab",/wfdif/i],["ARRI Rental",/arri\s*rental|arrirental/i],["ATM System",/atm\s*system|atmgrupa/i]].map(([label,rx])=>({label,people:(project.contacts||[]).filter(ct=>rx.test((ct.role||"")+" "+(ct.email||"")))})).filter(g=>g.people.length);
   const sc=STATUS.map(st=>({...st,n:present.filter(s=>(s.status||"todo")===st.k).length}));
   const look=(project.look||[]);
   const fmtD=d=>d?new Date(d+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}):"";
@@ -2377,6 +2381,10 @@ function Dashboard({project,onOpen,onNav}){
       <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><Label>Key contacts</Label><button onClick={()=>onNav("crew")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
         {(project.contacts||[]).length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet.</div>:project.contacts.slice(0,5).map(ct=><div key={ct.id||ct.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:7}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ct.name}</div>{ct.role&&<div style={{fontFamily:UI,fontSize:11,color:c.t2}}>{ct.role}</div>}</div><div style={{display:"flex",gap:9,flexShrink:0}}>{ct.phone&&<a href={waHref(ct.phone)} target="_blank" rel="noopener noreferrer" style={{color:c.t1}} title={`WhatsApp ${ct.phone}`}><Phone size={14}/></a>}{ct.email&&<a href={`mailto:${ct.email}`} style={{color:c.t1}}><Mail size={14}/></a>}</div></div>)}
+      </div>
+      <div style={{background:c.bg1,border:`1px solid ${c.line}`,borderRadius:13,padding:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><Label>Vendors</Label><button onClick={()=>onNav("crew")} style={{background:"none",border:"none",color:c.accent,fontFamily:UI,fontSize:12,cursor:"pointer"}}>Open →</button></div>
+        {vendorGroups.length===0?<div style={{fontFamily:UI,fontSize:12.5,color:c.t2}}>None yet.</div>:vendorGroups.map(g=><div key={g.label} style={{marginBottom:10}}><div style={{fontFamily:MONO,fontSize:10,color:c.t2,marginBottom:5}}>{g.label}</div>{g.people.map(ct=><div key={ct.id||ct.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:6}}><div style={{minWidth:0}}><div style={{fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ct.name}</div>{ct.role&&<div style={{fontFamily:UI,fontSize:11,color:c.t2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(ct.role||"").split("·")[0].trim()}</div>}</div><div style={{display:"flex",gap:9,flexShrink:0}}>{ct.phone&&<a href={waHref(ct.phone)} target="_blank" rel="noopener noreferrer" style={{color:c.t1}} title={`WhatsApp ${ct.phone}`}><Phone size={14}/></a>}{ct.email&&<a href={`mailto:${ct.email}`} style={{color:c.t1}} title={ct.email}><Mail size={14}/></a>}</div></div>)}</div>)}
       </div>
     </div>
   </div>;
