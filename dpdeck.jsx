@@ -3542,6 +3542,10 @@ export default function App(){
   const [view,setView]=useState("scenes");
   const [activeScene,setActiveScene]=useState(null);
   const [lens,setLens]=useState("story");
+  // PWA auto-update: when a newly deployed service worker takes control, reload once so the latest
+  // version shows on this relaunch instead of leaving a stale cached bundle. Skips first install (no
+  // controller yet) and guards against reload loops. Fixes "I reopened but still see the old layout".
+  useEffect(()=>{if(!("serviceWorker"in navigator)||!navigator.serviceWorker.controller)return;let done=false;const onCtrl=()=>{if(done)return;done=true;location.reload();};navigator.serviceWorker.addEventListener("controllerchange",onCtrl);return()=>navigator.serviceWorker.removeEventListener("controllerchange",onCtrl);},[]);
   const [ink,setInk]=useState(null);
   const [vf,setVf]=useState(null);
   const [light,setLight]=useState(null);
