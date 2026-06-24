@@ -17,7 +17,7 @@ const DARK = {
   bg0:"#121317", bg1:"#191A1F", bg2:"#212329", bg3:"#292C34", panel:"#15161A",
   line:"#2A2D34", line2:"#383C45",
   t0:"#ECEDEF", t1:"#A6ABB4", t2:"#6B7079",
-  accent:"#E0A33E", accentSoft:"#E0A33E26",
+  accent:"#E0A33E", accentSoft:"#E0A33E26", animation:"#17c4c4", animationSoft:"#17c4c422",
   ink:"#E0A33E", day:"#6FB0DE", night:"#7B82CF", dusk:"#C98AA0",
   ok:"#74B98C", warn:"#D8975A", danger:"#CE6B60",
   intC:"#C98F63", extC:"#6FB0DE", scrim:"#000000c2",
@@ -26,7 +26,7 @@ const LIGHT = {
   bg0:"#ECECE8", bg1:"#FBFBF9", bg2:"#FFFFFF", bg3:"#F2F2EE", panel:"#F4F4F0",
   line:"#E3E3DD", line2:"#D2D2C9",
   t0:"#1A1B1E", t1:"#54575E", t2:"#8B8F96",
-  accent:"#BE7A1E", accentSoft:"#BE7A1E1f",
+  accent:"#BE7A1E", accentSoft:"#BE7A1E1f", animation:"#0e9b9b", animationSoft:"#0e9b9b1f",
   ink:"#BE7A1E", day:"#3C82B8", night:"#5A61B2", dusk:"#B06A82",
   ok:"#3E9B62", warn:"#B0742E", danger:"#C05246",
   intC:"#A06A38", extC:"#3C82B8", scrim:"#3a3a36aa",
@@ -559,7 +559,7 @@ function mergeScene(base,ours,theirs){
   o.sketches=merge3List(base&&base.sketches,ours.sketches,theirs.sketches,x=>x);
   o.gearTags=merge3List(base&&base.gearTags,ours.gearTags,theirs.gearTags,x=>x);
   o.aiGear=merge3List(base&&base.aiGear,ours.aiGear,theirs.aiGear,x=>x.text);
-  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","noAutoLoc","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod","todSun","todDeg"])
+  for(const f of ["slug","set","dayNight","syn","synEdited","status","pageStart","pageEnd","eighths","locationId","noAutoLoc","shootDay","shootDate","shootOrder","storyIndex","scriptText","storyDay","tod","todSun","todDeg","animation"])
     o[f]=pickField(b[f],ours[f],theirs[f],om,tm);
   o._mt=Math.max(om,tm);
   return o;
@@ -787,7 +787,7 @@ function extractJSON(raw){
   if(a<0||b<0)throw new Error("Could not read a scene list from the response.");
   return JSON.parse(s.slice(a,b+1));
 }
-function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",noAutoLoc:false,notes:"",tod:"",todSun:"",todDeg:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||""};}
+function emptyScene(number,p={}){return {number:number||"",slug:p.slug||"",set:p.set||"",dayNight:p.dayNight||"",syn:p.syn||"",synEdited:false,storyIndex:p.storyIndex??9999,shootDay:"",shootDate:"",shootOrder:0,status:"todo",locationId:"",noAutoLoc:false,notes:"",tod:"",todSun:"",todDeg:"",pageStart:p.pageStart||0,pageEnd:p.pageEnd||0,eighths:p.eighths||0,refs:[],shots:[],gearTags:[],sketches:[],aiGear:[],scriptText:p.scriptText||"",animation:[]};}
 /* Scene length in eighths of a page -> the film-standard "N M/8" label (19 -> "2 3/8", 3 -> "3/8"). */
 const fmtEighths=e=>{e=+e||0;if(!e)return "";const w=Math.floor(e/8),f=e%8;return w?(f?`${w} ${f}/8`:`${w}`):`${f}/8`;};
 const dayEighths=scenes=>scenes.reduce((n,s)=>n+(+s.eighths||0),0);
@@ -1808,6 +1808,17 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
 
   const Work=<PanelShell wide={wide} title="Notes · Shots · Gear · Blocking" icon={<PenLine size={14} color={c.accent}/>}>
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
+      {scene.animation?.length>0&&<div>
+        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}><Film size={14} color={c.animation}/><Label style={{color:c.animation}}>Animation breakdown</Label></div>
+        <div style={{display:"flex",flexDirection:"column",gap:11}}>
+          {scene.animation.map((row,ri)=>row&&<div key={ri} style={{background:c.bg2,border:`1px solid ${c.animation}33`,borderRadius:10,padding:"11px 12px"}}>
+            {(row.type||(row.ref&&row.ref!==scene.number))&&<div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginBottom:7}}>{row.type&&<span style={{fontFamily:MONO,fontSize:10,fontWeight:700,letterSpacing:"0.02em",color:c.animation,background:c.animationSoft,border:`1px solid ${c.animation}55`,borderRadius:5,padding:"2px 7px"}}>{row.type}</span>}{row.ref&&row.ref!==scene.number&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2}}>scene {row.ref}</span>}</div>}
+            {row.desc&&<div style={{fontFamily:UI,fontSize:13,color:c.t0,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{row.desc}</div>}
+            {row.needs&&<div style={{fontFamily:UI,fontSize:12,color:c.t2,lineHeight:1.45,marginTop:6,whiteSpace:"pre-wrap"}}><span style={{color:c.animation,fontWeight:600}}>Needs / questions: </span>{row.needs}</div>}
+            {row.imgs&&row.imgs.length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:7,marginTop:9}}>{row.imgs.map((id,ii)=><div key={ii} onClick={()=>openLightbox&&openLightbox(row.imgs,ii)} style={{borderRadius:7,overflow:"hidden",border:`1px solid ${c.line2}`,background:c.bg1,cursor:"zoom-in"}}><StoredImg id={id} style={{width:"100%",height:"auto",display:"block",minHeight:34}}/></div>)}</div>}
+          </div>)}
+        </div>
+      </div>}
       <div>
         <Label style={{marginBottom:6}}>Notes</Label>
         <TextArea value={scene.notes} placeholder="Ideas, intent, references to the look…" onChange={e=>patchScene({notes:e.target.value})}/>
@@ -1863,6 +1874,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
 
   return <div style={{display:"flex",flexDirection:"column",gap:13,height:wide?"100%":"auto",minHeight:0}}>
     {wide?DaylightStrip:InfoStrip}
+    {scene.animation?.length>0&&<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:c.animationSoft,border:`1px solid ${c.animation}`,borderRadius:11,padding:"9px 14px"}}><Film size={16} color={c.animation}/><span style={{fontFamily:UI,fontSize:13,fontWeight:800,letterSpacing:"0.08em",color:c.animation}}>ANIMATION</span>{[...new Set(scene.animation.map(r=>r&&r.type).filter(Boolean))].map(t=><span key={t} style={{fontFamily:MONO,fontSize:10,fontWeight:600,color:c.animation,background:c.bg1,border:`1px solid ${c.animation}44`,borderRadius:5,padding:"2px 7px"}}>{t}</span>)}</div>}
     {wide?
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.05fr) minmax(0,1fr) minmax(0,1.05fr)",gap:13,flex:1,minHeight:0}}>{Script}{Reference}{Work}</div>:
       <div style={{display:"flex",flexDirection:"column",gap:13}}>{Script}{Reference}{Work}</div>}
@@ -3216,6 +3228,7 @@ function ExportDoc({project}){
         {s.syn&&<div style={{fontFamily:SERIF,fontSize:13.5,lineHeight:1.5,marginTop:8}}>{s.syn}</div>}
         {s.scriptText&&<div style={{marginTop:8}}><span style={sub}>Script</span><div style={{marginTop:3}}><ScreenplayText text={s.scriptText} base={P.text} strong={P.text} dim={P.muted} size={10}/></div></div>}
         {s.notes&&<div style={{marginTop:8}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12.5,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
+        {s.animation&&s.animation.length>0&&<div style={{marginTop:8}}><span style={sub}>Animation</span><div style={{marginTop:3}}>{s.animation.map((row,ri)=>row&&<div key={ri} style={{fontFamily:UI,fontSize:12.5,lineHeight:1.5,marginBottom:8}}>{(row.type||(row.ref&&row.ref!==s.number))&&<div style={{marginBottom:2}}>{row.type&&<b>{row.type}</b>}{row.ref&&row.ref!==s.number&&<span style={{color:P.muted,fontFamily:MONO,fontSize:11}}>{row.type?" · ":""}scene {row.ref}</span>}</div>}{row.desc&&<div style={{whiteSpace:"pre-wrap"}}>{row.desc}</div>}{row.needs&&<div style={{color:P.muted,whiteSpace:"pre-wrap",marginTop:2}}>Needs: {row.needs}</div>}{row.imgs&&row.imgs.length>0&&imgRow(row.imgs,120)}</div>)}</div></div>}
         {s.shots.length>0&&<div style={{marginTop:8}}><span style={sub}>Shot list</span><div style={{marginTop:4}}>{s.shots.map((sh,i)=><div key={sh.id} style={{fontFamily:UI,fontSize:12.5,lineHeight:1.55,display:"flex",gap:8}}><span style={{color:P.muted,fontFamily:MONO,fontSize:11,minWidth:34}}>{sh.done?"[x]":"[ ]"}</span><span>{i+1}. {sh.text}</span></div>)}</div></div>}
         {(()=>{const g=gearOf(s);return g.length?<div style={{marginTop:8}}><span style={sub}>Gear</span><div style={{marginTop:3}}>{DEPTS.map(d=>{const items=g.filter(x=>x.dept===d.k);return items.length?<div key={d.k} style={{fontFamily:UI,fontSize:12,lineHeight:1.55}}><b>{d.label}:</b> {items.map(x=>x.name).join(", ")}</div>:null;})}</div></div>:null;})()}
         {imgRow(s.refs,150)}
@@ -3435,6 +3448,7 @@ function SidesDoc({project,dayFilter}){
           {s.syn&&<div style={{fontFamily:SERIF,fontSize:13,lineHeight:1.5,marginTop:6}}>{s.syn}</div>}
           {s.scriptText&&<div style={{marginTop:6}}><span style={sub}>Script</span><div style={{marginTop:3}}><ScreenplayText text={s.scriptText} base={P.text} strong={P.text} dim={P.muted} size={10}/></div></div>}
           {s.notes&&<div style={{marginTop:6}}><span style={sub}>Notes</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3,whiteSpace:"pre-wrap"}}>{s.notes}</div></div>}
+          {s.animation&&s.animation.length>0&&<div style={{marginTop:6}}><span style={sub}>Animation</span><div style={{marginTop:3}}>{s.animation.map((row,ri)=>row&&<div key={ri} style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginBottom:7}}>{(row.type||(row.ref&&row.ref!==s.number))&&<div style={{marginBottom:2}}>{row.type&&<b>{row.type}</b>}{row.ref&&row.ref!==s.number&&<span style={{color:P.muted,fontFamily:MONO,fontSize:10}}>{row.type?" · ":""}scene {row.ref}</span>}</div>}{row.desc&&<div style={{whiteSpace:"pre-wrap"}}>{row.desc}</div>}{row.needs&&<div style={{color:P.muted,whiteSpace:"pre-wrap",marginTop:2}}>Needs: {row.needs}</div>}{row.imgs&&row.imgs.length>0&&imgRow(row.imgs,90)}</div>)}</div></div>}
           {(()=>{const w=solveTodWindow(s.todSun,s.todDeg,l&&l.lat,l&&l.lng,day.date,m.tz);if(!w&&!(s.tod||"").trim())return null;return <div style={{marginTop:6}}><span style={sub}>Time of day</span><div style={{fontFamily:UI,fontSize:12,lineHeight:1.5,marginTop:3}}>
             {w&&w.ok&&<div style={{fontWeight:700}}>{todAnchorLabel(s.todSun)}: {w.win}{w.extra?<span style={{fontWeight:400,color:P.muted}}> ({w.extra})</span>:""}</div>}
             {w&&!w.ok&&<div style={{color:P.muted}}>{todAnchorLabel(s.todSun)}: {w.why}</div>}
@@ -3532,7 +3546,7 @@ const DEFAULT_PROJECT=()=>({meta:{title:"Untitled Film",baseName:"",baseLat:"",b
 function normalizeProject(p){
   if(!p||typeof p!=="object")p=DEFAULT_PROJECT();
   p.meta={...DEFAULT_PROJECT().meta,...(p.meta||{})};
-  p.scenes=(p.scenes||[]).map(s=>{const m={...emptyScene(s.number),...s};for(const k of ["refs","shots","gearTags","sketches","aiGear"])if(!Array.isArray(m[k]))m[k]=[];m.number=String(m.number??"");m.shootDay=m.shootDay==null?"":String(m.shootDay);return m;}); // coerce number/shootDay so an external/AI deck with numeric values can't crash sorts
+  p.scenes=(p.scenes||[]).map(s=>{const m={...emptyScene(s.number),...s};for(const k of ["refs","shots","gearTags","sketches","aiGear","animation"])if(!Array.isArray(m[k]))m[k]=[];m.number=String(m.number??"");m.shootDay=m.shootDay==null?"":String(m.shootDay);return m;}); // coerce number/shootDay so an external/AI deck with numeric values can't crash sorts
   p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));
   p.crew={camera:[],grip:[],electric:[],sfx:[],...(p.crew||{})};
   p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];p.lookNotes=p.lookNotes||"";p.days=Array.isArray(p.days)?p.days:[];
