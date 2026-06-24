@@ -251,8 +251,8 @@ async function exportFullBackup(){
   for(const id of sketchIds){const sk=await store.get("pb:sketch:"+id);if(sk){data["pb:sketch:"+id]=sk;if(sk.bgImgId&&!isImgUrl(sk.bgImgId)&&!isR2Ref(sk.bgImgId))imgIds.add(sk.bgImgId);}}
   for(const id of imgIds){const v=await store.get("pb:img:"+id);if(v)data["pb:img:"+id]=v;const f=await store.get("pb:imgfull:"+id);if(f)data["pb:imgfull:"+id]=f;}
   for(const k of (await store.list())){if(String(k).startsWith("pb:scriptink:"))data[k]=await store.get(k);}
-  // Ground-truth document PDFs (script + schedule) ride the deck so they sync across devices.
-  for(const slot of ["script","schedule"]){const d=await store.get("pb:doc:"+slot);if(d){data["pb:doc:"+slot]=d;const n=await store.get("pb:doc:"+slot+"name");if(n)data["pb:doc:"+slot+"name"]=n;}}
+  // Ground-truth document PDFs ride the deck so they sync across devices. (animation = a small r2: marker, the PDF bytes live on R2 — see ensureDoc.)
+  for(const slot of ["script","schedule","animation"]){const d=await store.get("pb:doc:"+slot);if(d){data["pb:doc:"+slot]=d;const n=await store.get("pb:doc:"+slot+"name");if(n)data["pb:doc:"+slot+"name"]=n;}}
   const legacyPdf=await store.get("pb:scriptpdf");if(legacyPdf&&!data["pb:doc:script"]){data["pb:scriptpdf"]=legacyPdf;const n=await store.get("pb:scriptpdfname");if(n)data["pb:scriptpdfname"]=n;}
   return {dpdeckBackup:1,ts:Date.now(),data};
 }
@@ -619,7 +619,7 @@ function mergeDecks(baseProj,ours,theirs){                   // merge full backu
       for(const pg of Object.keys(t)){if(o[pg]&&!jeq(o[pg],t[pg])){const om=(o[pg]||{})._mt||0,tm=(t[pg]||{})._mt||0,oc=((o[pg]||{}).strokes||[]).length,tc=((t[pg]||{}).strokes||[]).length;m[pg]=(tm>om||(tm===om&&tc>oc))?t[pg]:o[pg];}}
       data[k]=m;}
     else data[k]=o||t;}
-  for(const slot of ["script","schedule"]){if(pool["pb:doc:"+slot]!==undefined){data["pb:doc:"+slot]=pool["pb:doc:"+slot];if(pool["pb:doc:"+slot+"name"]!==undefined)data["pb:doc:"+slot+"name"]=pool["pb:doc:"+slot+"name"];}}
+  for(const slot of ["script","schedule","animation"]){if(pool["pb:doc:"+slot]!==undefined){data["pb:doc:"+slot]=pool["pb:doc:"+slot];if(pool["pb:doc:"+slot+"name"]!==undefined)data["pb:doc:"+slot+"name"]=pool["pb:doc:"+slot+"name"];}}
   return {dpdeckBackup:1,ts:Math.max(ours.ts||0,theirs.ts||0)+1,data};
 }
 let pushLock=Promise.resolve();                              // serialize ALL pushes (debounce / focus / hide / bootstrap) — no overlapping cloud writes
@@ -993,9 +993,11 @@ function applyProjectFile(p,inc){
 /* ---- document store: ground-truth PDFs (script + schedule) ------- */
 /* Both ride the deck (pb:doc:{slot} base64) so they sync across devices and never need a
    per-device import. The script slot also drives per-scene page rendering (scriptDoc alias). */
-const docs={script:{doc:null,name:"",pageCache:new Map()},schedule:{doc:null,name:"",pageCache:new Map()}};
+const docs={script:{doc:null,name:"",pageCache:new Map()},schedule:{doc:null,name:"",pageCache:new Map()},animation:{doc:null,name:"",pageCache:new Map()}};
 const scriptDoc=docs.script;
-const DOC_LABEL={script:"Script",schedule:"Schedule"};
+const DOC_LABEL={script:"Script",schedule:"Schedule",animation:"Animation breakdown"};
+// page in the breakdown PDF that each animation scene sits on (best-effort jump; PdfViewer clamps to the doc's real page count, so a replaced PDF safely falls back to a valid page)
+const ANIM_PDF_PAGE={"2":1,"3":1,"3A":1,"15":1,"16":1,"17":1,"32A":1,"35":1,"36":2,"37":2,"43":2,"44":2,"45":2,"58":2,"59":2,"74":2,"75":2,"77":2,"79":2,"80":2,"113":2,"114":2,"115":3,"135":3};
 function abToB64(ab){const b=new Uint8Array(ab);let bin="";const CH=0x8000;for(let i=0;i<b.length;i+=CH)bin+=String.fromCharCode.apply(null,b.subarray(i,i+CH));return btoa(bin);}
 function b64ToU8(b64){if(typeof b64==="string"&&b64.startsWith("data:")){const c=b64.indexOf(",");if(c>=0)b64=b64.slice(c+1);}const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}// tolerate a stray data:...;base64, prefix (a server-side doc embed) so pb:doc:* always decodes
 async function saveDoc(slot,ab,name){
@@ -1004,16 +1006,34 @@ async function saveDoc(slot,ab,name){
   docs[slot].name=name||DOC_LABEL[slot];
   try{docs[slot].doc=await pdfFromArrayBuffer(ab);docs[slot].pageCache.clear();}catch{}
 }
+const _docLoading={};                                          // in-flight ensureDoc(slot) promises -> concurrent callers (PdfViewer + Documents mount) share ONE fetch/parse, never double-download the R2 PDF
 async function ensureDoc(slot){
   if(docs[slot].doc)return docs[slot].doc;
+  if(_docLoading[slot])return _docLoading[slot];
+  _docLoading[slot]=(async()=>{
   try{
     let b64=await store.get("pb:doc:"+slot);
     if(!b64&&slot==="script")b64=await store.get("pb:scriptpdf"); // legacy
     if(!b64)return null;
-    docs[slot].doc=await pdfFromArrayBuffer(b64ToU8(b64).buffer);
+    let buf,pendingCache=null;
+    if(typeof b64==="string"&&b64.startsWith("r2:")){           // doc bytes live on R2 (kept OUT of the synced deck — only this ~50-byte marker rides it); fetch once, then cache the bytes LOCALLY (pb:doccache:* is per-device, never synced) so it works offline + never re-downloads
+      const ref=b64,cached=await store.get("pb:doccache:"+slot);
+      if(cached&&cached.ref===ref&&cached.b64)buf=b64ToU8(cached.b64).buffer;
+      else{
+        const res=await fetch(R2_BASE+"/read/"+encodeURIComponent(ref.slice(3)).replace(/%2F/g,"/"),{headers:r2Headers()});
+        if(!res.ok)return null;
+        buf=await res.arrayBuffer();
+        pendingCache={ref,b64:abToB64(buf)};                    // snapshot BEFORE pdf.js can detach buf; persisted only after a successful parse below
+      }
+    }else buf=b64ToU8(b64).buffer;
+    docs[slot].doc=await pdfFromArrayBuffer(buf);
+    if(pendingCache)try{await store.set("pb:doccache:"+slot,pendingCache);}catch{}
     docs[slot].name=(await store.get("pb:doc:"+slot+"name"))||(slot==="script"?(await store.get("pb:scriptpdfname")):"")||DOC_LABEL[slot];
     return docs[slot].doc;
   }catch{return null;}
+  finally{delete _docLoading[slot];}
+  })();
+  return _docLoading[slot];
 }
 const setScriptPDF=(ab,name)=>saveDoc("script",ab,name);
 const restoreScriptPDF=()=>ensureDoc("script").then(d=>!!d);
@@ -1809,7 +1829,7 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
   const Work=<PanelShell wide={wide} title="Notes · Shots · Gear · Blocking" icon={<PenLine size={14} color={c.accent}/>}>
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       {scene.animation?.length>0&&<div>
-        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}><Film size={14} color={c.animation}/><Label style={{color:c.animation}}>Animation breakdown</Label></div>
+        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}><Film size={14} color={c.animation}/><Label style={{color:c.animation}}>Animation breakdown</Label>{openPdf&&<IconBtn icon={BookOpen} size={15} dim title="Open the animation breakdown PDF (source of truth) at this scene" onClick={()=>openPdf({slot:"animation",start:ANIM_PDF_PAGE[String(scene.number||"").toUpperCase()]||1,title:"Animation breakdown · Scene "+scene.number})}/>}</div>
         <div style={{display:"flex",flexDirection:"column",gap:11}}>
           {scene.animation.map((row,ri)=>row&&<div key={ri} style={{background:c.bg2,border:`1px solid ${c.animation}33`,borderRadius:10,padding:"11px 12px"}}>
             {(row.type||(row.ref&&row.ref!==scene.number))&&<div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginBottom:7}}>{row.type&&<span style={{fontFamily:MONO,fontSize:10,fontWeight:700,letterSpacing:"0.02em",color:c.animation,background:c.animationSoft,border:`1px solid ${c.animation}55`,borderRadius:5,padding:"2px 7px"}}>{row.type}</span>}{row.ref&&row.ref!==scene.number&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2}}>scene {row.ref}</span>}</div>}
@@ -3154,7 +3174,7 @@ function SettingsView({project,setProject,onToast,onThemeChange,onNav}){
       </div>
       <div style={{fontFamily:MONO,fontSize:10.5,color:c.t2,marginBottom:14}}>{lastBk?`Last download backup: ${new Date(lastBk).toLocaleDateString()}`:"No download backup taken yet."}{R2_KEY?" · cloud snapshots: on":" · cloud snapshots: off"}</div>
       {!wipe?<Btn kind="danger" size={12} onClick={()=>setWipe(true)}><Trash2 size={15}/>Erase everything</Btn>:
-        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:scriptname","pb:doc:schedulename","pb:snap_day"])await store.del(k);try{localStorage.removeItem(LS_MIRROR);}catch{}location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
+        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:animation","pb:doc:scriptname","pb:doc:schedulename","pb:doc:animationname","pb:doccache:animation","pb:snap_day"])await store.del(k);try{localStorage.removeItem(LS_MIRROR);}catch{}location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
     </Card>
     <div style={{textAlign:"center",fontFamily:MONO,fontSize:10.5,color:c.t2,padding:"4px 0 12px"}}>DP DECK · prep + shoot · one film</div>
   </div>;
@@ -3523,21 +3543,22 @@ function LookBoard({project,setProject,openLightbox,onToast}){
 /* DOCUMENTS — the ground-truth current PDFs (script + schedule), viewable full-screen */
 function Documents({openPdf,onToast}){
   const [,tick]=useState(0);
-  useEffect(()=>{let on=true;Promise.all([ensureDoc("script"),ensureDoc("schedule")]).then(()=>on&&tick(x=>x+1));return()=>{on=false;};},[]);
+  useEffect(()=>{let on=true;Promise.all([ensureDoc("script"),ensureDoc("schedule")]).then(()=>on&&tick(x=>x+1));return()=>{on=false;};},[]);// animation is cloud-backed (1.83MB) — don't eagerly download it; the card's Open loads it on demand
   const load=slot=>async file=>{if(!file)return;try{onToast&&onToast("Loading "+DOC_LABEL[slot]+"…");await saveDoc(slot,await file.arrayBuffer(),file.name);tick(x=>x+1);onToast&&onToast(DOC_LABEL[slot]+" loaded · syncs to your other devices");}catch(e){onToast&&onToast("Couldn't load that PDF");}};
-  const Slot=({slot,icon:Icon,desc})=>{const loaded=!!docs[slot].doc,name=docs[slot].name;return (
+  const Slot=({slot,icon:Icon,desc,cloud})=>{const loaded=!!docs[slot].doc,name=docs[slot].name;return (
     <Card title={DOC_LABEL[slot]} icon={Icon}>
       <div style={{fontFamily:UI,fontSize:12.5,color:c.t2,lineHeight:1.5,marginBottom:11}}>{desc}</div>
       <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}>
-        <Btn kind="primary" size={12} disabled={!loaded} onClick={()=>openPdf({slot,start:1,title:DOC_LABEL[slot]})}><BookOpen size={15}/>{loaded?"Open":"Not loaded"}</Btn>
-        <label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={14}/>{loaded?"Replace PDF":"Load PDF"}</Btn><input type="file" accept="application/pdf" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];e.target.value="";load(slot)(f);}}/></label>
+        <Btn kind="primary" size={12} disabled={!loaded&&!cloud} onClick={()=>openPdf({slot,start:1,title:DOC_LABEL[slot]})}><BookOpen size={15}/>{loaded||cloud?"Open":"Not loaded"}</Btn>
+        {cloud?<span style={{fontFamily:MONO,fontSize:11,color:c.t2}}>Stored in cloud · loads on open</span>:<label style={{cursor:"pointer"}}><Btn kind="ghost" size={12}><Upload size={14}/>{loaded?"Replace PDF":"Load PDF"}</Btn><input type="file" accept="application/pdf" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];e.target.value="";load(slot)(f);}}/></label>}
         {loaded&&name&&<span style={{fontFamily:MONO,fontSize:11,color:c.t2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:240}}>{name}</span>}
       </div>
     </Card>);};
   return <div style={{maxWidth:720,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}}>
-    <div style={{fontFamily:UI,fontSize:13.5,color:c.t1,lineHeight:1.55,maxWidth:640}}>The ground-truth current documents. Open either full-screen and flip pages with the arrows (or swipe). They travel with the deck, so once loaded they show on every synced device.</div>
+    <div style={{fontFamily:UI,fontSize:13.5,color:c.t1,lineHeight:1.55,maxWidth:640}}>The ground-truth current documents. Open any full-screen and flip pages with the arrows (or swipe). They travel with the deck, so once loaded they show on every synced device.</div>
     <Slot slot="script" icon={FileText} desc="The current screenplay PDF. Also drives the per-scene script pages and the expand button in each scene."/>
     <Slot slot="schedule" icon={Calendar} desc="The current one-liner / shooting schedule PDF."/>
+    <Slot slot="animation" icon={Film} cloud desc="The claymation & animation breakdown (per-scene description, needs & storyboards). The book icon in each animation scene opens it here too. Stored in cloud storage to keep the deck light, so it loads when you open it."/>
   </div>;
 }
 
