@@ -334,7 +334,7 @@ function loadPdfjs(){
 }
 async function pdfFromArrayBuffer(ab){const lib=await loadPdfjs();return lib.getDocument({data:ab}).promise;}
 async function pdfPageText(doc,n){const page=await doc.getPage(n);const tc=await page.getTextContent();let last=0,out="";for(const it of tc.items){const y=it.transform[5];if(last&&Math.abs(y-last)>4)out+="\n";out+=it.str+(it.hasEOL?"\n":" ");last=y;}return out;}
-async function pdfRenderPage(doc,n,scale=1.6){const page=await doc.getPage(n);const vp=page.getViewport({scale});const cv=document.createElement("canvas");cv.width=vp.width;cv.height=vp.height;await page.render({canvasContext:cv.getContext("2d"),viewport:vp}).promise;return {url:cv.toDataURL("image/jpeg",0.85),w:vp.width,h:vp.height};}
+async function pdfRenderPage(doc,n,scale=1.6,q=0.85){const page=await doc.getPage(n);const vp=page.getViewport({scale});const cv=document.createElement("canvas");cv.width=vp.width;cv.height=vp.height;await page.render({canvasContext:cv.getContext("2d"),viewport:vp}).promise;return {url:cv.toDataURL("image/jpeg",q),w:vp.width,h:vp.height};}
 
 /* ---- speech ------------------------------------------------------ */
 function say(t){try{const u=new SpeechSynthesisUtterance(t);u.rate=0.92;window.speechSynthesis.cancel();window.speechSynthesis.speak(u);}catch{}}
@@ -1037,12 +1037,15 @@ async function ensureDoc(slot){
 }
 const setScriptPDF=(ab,name)=>saveDoc("script",ab,name);
 const restoreScriptPDF=()=>ensureDoc("script").then(d=>!!d);
-async function getDocPageImage(slot,n){
+async function getDocPageImage(slot,n,hi){
   const d=docs[slot];if(!d.doc||n<1||n>d.doc.numPages)return null;
-  if(d.pageCache.has(n))return d.pageCache.get(n);
-  const r=await pdfRenderPage(d.doc,n,1.7);
-  if(d.pageCache.size>=24){const oldest=d.pageCache.keys().next().value;d.pageCache.delete(oldest);} // bound rendered-page cache
-  d.pageCache.set(n,r);return r;
+  const key=hi?n+":h":n;
+  if(d.pageCache.has(key))return d.pageCache.get(key);
+  let scale=1.7,q=0.85;
+  if(hi){scale=4;q=0.9;try{const vp=(await d.doc.getPage(n)).getViewport({scale:1});scale=Math.min(5,Math.sqrt(15000000/Math.max(vp.width*vp.height,1)));}catch{}} // zoomed = render at high DPI so dense text stays crisp; area-cap keeps the canvas under mobile limits (~15M px). The viewer then displays it at width=px/dpr for a 1:1 (crisp) mapping.
+  const r=await pdfRenderPage(d.doc,n,scale,q);
+  if(d.pageCache.size>=16){const oldest=d.pageCache.keys().next().value;d.pageCache.delete(oldest);} // bound rendered-page cache (hi-res pages are larger)
+  d.pageCache.set(key,r);return r;
 }
 async function getScriptPageImage(n){return getDocPageImage("script",n);}
 /* Robust scene -> PDF page map: scan the ACTUAL script PDF text for each scene's heading
@@ -1570,10 +1573,11 @@ function PdfViewer({open,slot,start,title,onClose}){
   useEffect(()=>{if(!open)return;let on=true;setDoc(null);setImg(null);setErr(false);setZoom(false);
     ensureDoc(slot).then(d=>{if(!on)return;if(!d){setErr(true);return;}setDoc(d);setN(clamp(start||1,1,d.numPages));});
     return()=>{on=false;};},[open,slot,start]);
-  useEffect(()=>{if(!open||!doc)return;let on=true;setImg(null);getDocPageImage(slot,n).then(r=>{if(on)setImg(r);});return()=>{on=false;};},[open,doc,n,slot]);
+  useEffect(()=>{if(!open||!doc)return;let on=true;setImg(null);getDocPageImage(slot,n,zoom).then(r=>{if(on)setImg(r);});return()=>{on=false;};},[open,doc,n,slot,zoom]);// zoom -> re-render the page at high DPI (cached per page+level, so toggling back is instant)
   useEffect(()=>{if(!open)return;const h=e=>{if(e.key==="Escape")onClose();else if(doc&&(e.key==="ArrowRight"||e.key==="ArrowDown")){e.preventDefault();setN(x=>Math.min(x+1,doc.numPages));}else if(doc&&(e.key==="ArrowLeft"||e.key==="ArrowUp")){e.preventDefault();setN(x=>Math.max(x-1,1));}};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[open,doc,onClose]);
   if(!open)return null;
   const N=doc?doc.numPages:0;
+  const dpr=(typeof window!=="undefined"&&window.devicePixelRatio)||1;// display the hi-res zoom image at px/dpr so its pixels map 1:1 to device pixels (no DPR upscaling = crisp)
   const go=d=>setN(x=>clamp(x+d,1,N||1));
   const ts=e=>{touch.current=e.touches[0].clientX;};
   const te=e=>{if(touch.current==null||zoom)return;const dx=e.changedTouches[0].clientX-touch.current;touch.current=null;if(Math.abs(dx)>45)go(dx<0?1:-1);};
@@ -1590,7 +1594,7 @@ function PdfViewer({open,slot,start,title,onClose}){
     <div onTouchStart={ts} onTouchEnd={te} style={{flex:1,overflow:"auto",display:"flex",alignItems:zoom?"flex-start":"center",justifyContent:"center",padding:14,position:"relative",WebkitOverflowScrolling:"touch"}}>
       {err?<div style={{color:c.t2,fontFamily:UI,fontSize:14,textAlign:"center",maxWidth:340,lineHeight:1.5,alignSelf:"center"}}>No {DOC_LABEL[slot].toLowerCase()} PDF loaded yet. Add it in Docs and it syncs to your other devices.</div>:
        !img?<div style={{color:c.t2,fontFamily:MONO,fontSize:13,alignSelf:"center"}}>Rendering page {n}…</div>:
-       <img src={img.url} alt="" style={{width:zoom?"auto":"100%",maxWidth:zoom?"none":920,maxHeight:zoom?"none":"100%",objectFit:"contain",borderRadius:4,boxShadow:"0 6px 30px #000a"}}/>}
+       <img src={img.url} alt="" style={{...(zoom?{width:Math.round(img.w/dpr)+"px",maxWidth:"none",maxHeight:"none"}:{width:"100%",maxWidth:920,maxHeight:"100%",objectFit:"contain"}),borderRadius:4,boxShadow:"0 6px 30px #000a"}}/>}
     </div>
     {N>1&&<>
       <button onClick={()=>go(-1)} style={{...nav,position:"absolute",left:14,top:"56%",opacity:n<=1?0.35:1}}><ChevronLeft size={26}/></button>
