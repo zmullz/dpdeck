@@ -585,6 +585,8 @@ function mergeProjects(base,ours,theirs){
   out.inbox=merge3List(base.inbox,ours.inbox,theirs.inbox,x=>x.id||JSON.stringify(x));
   out.lookNotes=pickBulk(base.lookNotes,ours.lookNotes,theirs.lookNotes);
   out.days=pickBulk(base.days,ours.days,theirs.days);
+  out.events=merge3List(base.events,ours.events,theirs.events,e=>e&&(e.id||JSON.stringify(e)));  // calendar events sync + cross-device add/edit/delete
+
   out.meta={...theirs.meta,...ours.meta};                    // device-local prefs (theme) stay; title/tz are identical
   // Integrity: a gearTag must never orphan. If concurrent gear-delete + scene-edit dropped a gear def
   // that a scene still references, re-attach it from any side so the gear NAME is never lost.
@@ -2158,7 +2160,9 @@ function CalendarView({project,onOpen}){
     else for(const s of project.scenes){if(s.status==="omitted"||!s.shootDate)continue;add(s.shootDate,s.shootDay,s.number);}
     return m;
   },[project.days,project.scenes]);
-  const dates=[...byDate.keys()].sort();
+  const EVCOL="#6ea8fe";  // prep / non-shoot events (readings, recce) - distinct from the amber shoot days
+  const evByDate=useMemo(()=>{const m=new Map();for(const e of (project.events||[])){if(!e||!e.start)continue;const last=new Date((e.end||e.start)+"T12:00:00Z");let d=new Date(e.start+"T12:00:00Z"),g=0;while(d<=last&&g++<400){const k=`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;if(!m.has(k))m.set(k,[]);m.get(k).push(e.title||"Event");d.setUTCDate(d.getUTCDate()+1);}}return m;},[project.events]);
+  const dates=[...new Set([...byDate.keys(),...evByDate.keys()])].sort();
   const [ym,setYm]=useState((dates.find(d=>d>=todayISO())||dates[0]||todayISO()).slice(0,7));
   const [y,mo]=ym.split("-").map(Number);
   const firstDow=new Date(Date.UTC(y,mo-1,1)).getUTCDay();
@@ -2178,12 +2182,13 @@ function CalendarView({project,onOpen}){
       {["Su","Mo","Tu","We","Th","Fr","Sa"].map(d=><div key={d} style={{textAlign:"center",fontFamily:MONO,fontSize:10,color:c.t2,padding:"2px 0"}}>{d}</div>)}
       {cells.map((d,i)=>{
         if(!d)return <div key={"e"+i}/>;
-        const key=`${ym}-${String(d).padStart(2,"0")}`;const sh=byDate.get(key);const today=key===ti;
-        return <div key={key} style={{borderRadius:9,border:`1px solid ${today?c.accent:c.line}`,background:sh?c.accentSoft:c.bg1,padding:"5px 6px",display:"flex",flexDirection:"column",gap:3}}>
+        const key=`${ym}-${String(d).padStart(2,"0")}`;const sh=byDate.get(key);const ev=evByDate.get(key);const today=key===ti;
+        return <div key={key} style={{borderRadius:9,border:`1px solid ${today?c.accent:c.line}`,background:sh?c.accentSoft:(ev?EVCOL+"1f":c.bg1),padding:"5px 6px",display:"flex",flexDirection:"column",gap:3}}>
           <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}>
             <span style={{fontFamily:MONO,fontSize:11,color:today?c.accent:c.t2,fontWeight:today?700:400}}>{d}</span>
             {sh&&<span style={{fontFamily:UI,fontSize:9.5,fontWeight:700,color:c.accent}}>D{sh.day}</span>}
           </div>
+          {ev&&<div style={{display:"flex",flexDirection:"column",gap:2}}>{ev.map((t,j)=><div key={j} title={t} style={{fontFamily:UI,fontSize:9,fontWeight:600,color:EVCOL,background:EVCOL+"22",border:`1px solid ${EVCOL}55`,borderRadius:4,padding:"1px 4px",lineHeight:1.25,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t}</div>)}</div>}
           {sh&&<div style={{display:"flex",flexWrap:"wrap",gap:3}}>
             {sortNums(sh.scenes).map(n=>{const s=sceneByNum.get(numKey(n));const col=s?dnColor(s.dayNight):c.t2;return <button key={n} title={s?`${s.slug} ${s.set} ${s.dayNight||""}`.trim():`Scene ${n}`} onClick={()=>onOpen&&onOpen(n)} style={{fontFamily:MONO,fontSize:9.5,fontWeight:700,color:c.t0,background:c.bg2,border:`1px solid ${c.line2}`,borderLeft:`2.5px solid ${col}`,borderRadius:4,padding:"1px 4px",cursor:"pointer",lineHeight:1.35}}>{n}</button>;})}
           </div>}
@@ -2192,6 +2197,7 @@ function CalendarView({project,onOpen}){
     </div>
     <div style={{display:"flex",gap:12,marginTop:10,flexWrap:"wrap",fontFamily:UI,fontSize:10.5,color:c.t2}}>
       {DAYNIGHT.map(dn=><span key={dn} style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:dnColor(dn)}}/>{dn}</span>)}
+      <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:EVCOL}}/>prep / event</span>
       <span style={{color:c.t2}}>· tap a scene to open it</span>
     </div>
   </div>;
@@ -3530,6 +3536,7 @@ function normalizeProject(p){
   p.locations=(p.locations||[]).map(l=>({...l,images:l.images||[],plans:l.plans||[]}));
   p.crew={camera:[],grip:[],electric:[],sfx:[],...(p.crew||{})};
   p.contacts=p.contacts||[];p.gear=p.gear||[];p.inbox=p.inbox||[];p.look=p.look||[];p.lookNotes=p.lookNotes||"";p.days=Array.isArray(p.days)?p.days:[];
+  p.events=Array.isArray(p.events)?p.events:[];  // non-shoot calendar events (readings, recce, etc.): {id,title,start,end}
   return p;
 }
 const NAV=[
