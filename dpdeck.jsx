@@ -2168,6 +2168,11 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
   const rd=(project.days||[]).find(x=>String(x.day)===String(day))||{};
   const schedPage=rd.page||0;  // PDF page for this day, from the embedded schedule
   const move=(rd.locs||[]).length>1;  // more than one shooting location this day = company move
+  // GROUND-TRUTH reconcile: a PSS address -> the curated location its scenes already link to (scene.locationId). No geocoding, no invention.
+  const addrLoc={};scenes.forEach(s=>{const a=(rd.sceneLoc||{})[numKey(s.number)];if(a&&s.locationId){addrLoc[a]=addrLoc[a]||{};addrLoc[a][s.locationId]=(addrLoc[a][s.locationId]||0)+1;}});
+  const locFor=a=>{const m=addrLoc[a];if(!m)return null;const id=Object.keys(m).sort((x,y)=>m[y]-m[x])[0];return (project.locations||[]).find(l=>l.id===id)||null;};
+  const primaryL=locFor(rd.loc);
+  const sunLoc=(primaryL&&primaryL.lat!=null&&primaryL.lat!=="")?primaryL:loc;  // weather/sun from the day's primary (address-matched) location when it has GPS, else first scene-with-GPS
   const byAfter={};(rd.banners||[]).forEach(b=>{const k=b.after||"";(byAfter[k]=byAfter[k]||[]).push(b.text);});  // inline notes keyed by the scene they follow
   const dayKeys=new Set(scenes.map(s=>numKey(s.number)));
   const topB=[];Object.keys(byAfter).forEach(k=>{if(!k||!dayKeys.has(k))topB.push(...byAfter[k]);});  // top-of-day + notes whose anchor scene isn't on this day
@@ -2175,12 +2180,12 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
   const hasGear=DEPTS.some(d=>gear[d.k].size);
   const rows=[];
   topB.forEach((t,i)=>rows.push(<SchedBanner key={"tb"+i} text={t}/>));
-  scenes.forEach(s=>{const sl=move?(rd.sceneLoc||{})[numKey(s.number)]:"";
+  scenes.forEach(s=>{const sl=move?(rd.sceneLoc||{})[numKey(s.number)]:"";const sll=sl?locFor(sl):null;
     rows.push(<button key={s.number} onClick={()=>onOpen(s.number)} style={{display:"flex",alignItems:"center",gap:11,padding:"8px 10px",background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,cursor:"pointer",textAlign:"left"}}>
       <span style={{fontFamily:MONO,fontSize:11,color:c.t2,minWidth:18}}>{s.shootOrder||"—"}</span>
       <span style={{fontFamily:MONO,fontSize:14,fontWeight:700,color:c.accent,minWidth:34}}>{s.number}</span>
       <span style={{flex:1,minWidth:0,fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.slug} {s.set} <span style={{color:c.t2,fontFamily:MONO,fontSize:10}}>{s.dayNight}</span></span>
-      {sl&&<span title={sl} style={{fontFamily:MONO,fontSize:9.5,color:c.t2,maxWidth:96,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flexShrink:0,display:"flex",alignItems:"center",gap:2}}><MapPin size={9}/>{sl}</span>}
+      {sl&&<span title={sll?sl+" · open location":sl} onClick={sll?(e=>{e.stopPropagation();onOpen("__loc__"+sll.id);}):undefined} style={{fontFamily:MONO,fontSize:9.5,color:sll?c.accent:c.t2,maxWidth:104,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flexShrink:0,display:"flex",alignItems:"center",gap:2,cursor:sll?"pointer":"default",textDecoration:sll?"underline":"none"}}><MapPin size={9}/>{sl}</span>}
       {s.eighths>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2,flexShrink:0}}>{fmtEighths(s.eighths)}</span>}
       {s.refs.length>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2}}>{s.refs.length}<ImageIcon size={10} style={{verticalAlign:"-1px",marginLeft:2}}/></span>}
     </button>);
@@ -2198,10 +2203,10 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
     </div>
     {(rd.loc||loc)&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",flexDirection:"column",gap:9}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
-        <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap"}}>{rd.loc?<Chip color={c.t1}><MapPin size={11}/>{rd.loc}</Chip>:(loc&&<Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip>)}{move&&<Chip color={c.accent}><Navigation size={10}/>Company move · {rd.locs.length} locations</Chip>}</div>
-        {loc&&<div style={{display:"flex",gap:12,alignItems:"center"}}><WeatherInline lat={loc.lat} lng={loc.lng} date={date}/><TravelChip meta={project.meta} lat={loc.lat} lng={loc.lng}/></div>}
+        <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap"}}>{rd.loc?<Chip color={primaryL?c.accent:c.t1} onClick={primaryL?()=>onOpen("__loc__"+primaryL.id):undefined}><MapPin size={11}/>{rd.loc}{primaryL&&<ChevronRight size={11} style={{marginLeft:1}}/>}</Chip>:(loc&&<Chip color={c.t1} onClick={()=>onOpen("__loc__"+loc.id)}><MapPin size={11}/>{loc.name}<ChevronRight size={11} style={{marginLeft:1}}/></Chip>)}{move&&<Chip color={c.accent}><Navigation size={10}/>Company move · {rd.locs.length} locations</Chip>}</div>
+        {sunLoc&&<div style={{display:"flex",gap:12,alignItems:"center"}}><WeatherInline lat={sunLoc.lat} lng={sunLoc.lng} date={date}/><TravelChip meta={project.meta} lat={sunLoc.lat} lng={sunLoc.lng}/></div>}
       </div>
-      {loc&&date&&<SunBar lat={loc.lat} lng={loc.lng} tz={project.meta.tz} date={date}/>}
+      {sunLoc&&date&&<SunBar lat={sunLoc.lat} lng={sunLoc.lng} tz={project.meta.tz} date={date}/>}
     </div>}
     <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:6}}>{rows}</div>
     {hasGear&&<div style={{padding:"0 15px 14px"}}><div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}><Label style={{marginBottom:7}}>Gear this day</Label>{DEPTS.map(d=>gear[d.k].size?<div key={d.k} style={{display:"flex",gap:7,marginBottom:5,alignItems:"flex-start"}}><span style={{fontFamily:MONO,fontSize:10,color:c.t2,minWidth:58,paddingTop:3}}>{d.label}</span><div style={{display:"flex",flexWrap:"wrap",gap:5}}>{[...gear[d.k]].map(n=><Chip key={n} small>{n}</Chip>)}</div></div>:null)}</div></div>}
