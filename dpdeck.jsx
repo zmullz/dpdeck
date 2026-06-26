@@ -631,6 +631,11 @@ let pushLock=Promise.resolve();                              // serialize ALL pu
 let forceNextPush=false;
 const SHRINK_GUARD_FRAC=0.6, SHRINK_GUARD_MIN=5;
 const crewCount=p=>Object.values((p&&p.crew)||{}).reduce((n,a)=>n+(Array.isArray(a)?a.length:0),0); // total crew across all departments, for the shrink guard
+// Hand-entered data totals across scenes — gear tags, shots, reference images — so the shrink guard
+// also catches a wipe of precious hand-data even when the scene COUNT is unchanged (gear/shots live on
+// the scenes, not as their own collection, so the scene-count guard alone can't see them disappear).
+const handCount=p=>{let gearTags=0,shots=0,refs=0;for(const s of (p&&p.scenes)||[]){gearTags+=(s.gearTags||[]).length;shots+=(s.shots||[]).length;refs+=(s.refs||[]).length;}return {gearTags,shots,refs};};
+const SHRINK_LABEL={scenes:"scenes",locations:"locations",crew:"crew",gearTags:"gear tags",shots:"shots",refs:"reference images"};
 async function forcePushDeck(){forceNextPush=true;try{const r=await pushDeckToCloud();await store.del("pb:sync_blocked");return r;}finally{forceNextPush=false;}}
 function pushDeckToCloud(){const run=pushLock.then(()=>_pushDeckToCloud(0),()=>_pushDeckToCloud(0));pushLock=run.catch(()=>{});return run;}
 async function _pushDeckToCloud(depth,carryBase,carryOurs){
@@ -640,13 +645,13 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
   const ours=(carryOurs!==undefined)?carryOurs:await exportFullBackup();                         // our local edits, captured ONCE (never re-diffed against a prior merge)
   const meta=await remoteDeckMeta();
   const localSynced=(await store.get("pb:synced_ts"))||0,remoteTs=(meta&&meta.ts)||0;
-  let merged=false,pushDeck=ours,theirsScenes=0,theirsLocs=0,theirsCrew=0;
+  let merged=false,pushDeck=ours,theirsScenes=0,theirsLocs=0,theirsCrew=0,theirsHand={gearTags:0,shots:0,refs:0};
   if(remoteTs>localSynced){                                  // cloud is ahead -> MUST merge; a throw here must NOT fall through to an overwrite
     const t=await r2ReadRaw(DECK_KEY);                        // (throws on a transient read error -> propagates; never plain-overwrites unseen edits)
     if(t){
       const theirs=JSON.parse(t);
       const tp=(theirs.data||{})["pb:project"]||{};
-      theirsScenes=(tp.scenes||[]).length;theirsLocs=(tp.locations||[]).length;theirsCrew=crewCount(tp);
+      theirsScenes=(tp.scenes||[]).length;theirsLocs=(tp.locations||[]).length;theirsCrew=crewCount(tp);theirsHand=handCount(tp);
       const m=mergeDecks(base,ours,theirs);
       merged=true;
       if(jeq(m.data["pb:project"],theirs.data["pb:project"])){ // we contributed nothing -> adopt remote, no push (prevents sync ping-pong)
@@ -660,19 +665,20 @@ async function _pushDeckToCloud(depth,carryBase,carryOurs){
   // Mass-deletion guard: never auto-write a deck that drops a large share of ANY major collection
   // (scenes / locations / crew) vs the last known cloud/base, and never push an empty deck once we had one.
   const P=(pushDeck.data||{})["pb:project"]||{};
-  const newC={scenes:(P.scenes||[]).length,locations:(P.locations||[]).length,crew:crewCount(P)};
-  const baseC={scenes:(base&&Array.isArray(base.scenes))?base.scenes.length:0,locations:(base&&Array.isArray(base.locations))?base.locations.length:0,crew:crewCount(base)};
-  const priorC={scenes:Math.max(baseC.scenes,theirsScenes),locations:Math.max(baseC.locations,theirsLocs),crew:Math.max(baseC.crew,theirsCrew)};
+  const nH=handCount(P),bH=handCount(base);
+  const newC={scenes:(P.scenes||[]).length,locations:(P.locations||[]).length,crew:crewCount(P),gearTags:nH.gearTags,shots:nH.shots,refs:nH.refs};
+  const baseC={scenes:(base&&Array.isArray(base.scenes))?base.scenes.length:0,locations:(base&&Array.isArray(base.locations))?base.locations.length:0,crew:crewCount(base),gearTags:bH.gearTags,shots:bH.shots,refs:bH.refs};
+  const priorC={scenes:Math.max(baseC.scenes,theirsScenes),locations:Math.max(baseC.locations,theirsLocs),crew:Math.max(baseC.crew,theirsCrew),gearTags:Math.max(baseC.gearTags,theirsHand.gearTags),shots:Math.max(baseC.shots,theirsHand.shots),refs:Math.max(baseC.refs,theirsHand.refs)};
   let blocked=null;
   if(!forceNextPush){
     if(newC.scenes===0&&(localSynced>0||priorC.scenes>0))blocked={kind:"scenes",prior:priorC.scenes,next:0};  // never push an empty deck once a real deck was ever synced
-    else for(const k of ["scenes","locations","crew"]){
+    else for(const k of ["scenes","locations","crew","gearTags","shots","refs"]){  // also guards hand-data (gear/shots/refs) from a silent bulk wipe even when scene count is unchanged
       if(priorC[k]>0&&newC[k]<priorC[k]*SHRINK_GUARD_FRAC&&(priorC[k]-newC[k])>=SHRINK_GUARD_MIN){blocked={kind:k,prior:priorC[k],next:newC[k]};break;}
     }
   }
   if(blocked){
     await store.set("pb:sync_blocked",{...blocked,at:Date.now()});
-    const err=new Error("Cloud sync paused: this device has "+blocked.next+" "+blocked.kind+" but the cloud has "+blocked.prior+". Held to protect the cloud deck. Pull the cloud copy, or force-push in Settings if this is intended.");
+    const err=new Error("Cloud sync paused: this device has "+blocked.next+" "+(SHRINK_LABEL[blocked.kind]||blocked.kind)+" but the cloud has "+blocked.prior+". Held to protect the cloud deck. Pull the cloud copy, or force-push in Settings if this is intended.");
     err.code="SYNC_SHRINK_GUARD";err.guard=blocked;
     throw err;
   }
@@ -3123,7 +3129,7 @@ function SettingsView({project,setProject,onToast,onThemeChange,onNav}){
   return <div style={{maxWidth:640,margin:"0 auto",display:"flex",flexDirection:"column",gap:16}}>
     {blocked&&R2_KEY&&<div style={{background:c.bg1,border:`1px solid ${c.warn||"#d98a3d"}`,borderRadius:13,padding:15}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><AlertTriangle size={16} color={c.warn||"#d98a3d"}/><Label style={{color:c.warn||"#d98a3d"}}>Cloud sync paused</Label></div>
-      <div style={{fontFamily:UI,fontSize:13,color:c.t1,lineHeight:1.5,marginBottom:12}}>This device has <b>{blocked.next}</b> {blocked.kind||"scenes"} but the cloud has <b>{blocked.prior}</b>. To protect the cloud deck, the sync was held instead of overwriting it. Almost always you want to <b>pull the cloud copy</b>. Only force-push if this device is deliberately the new source of truth.</div>
+      <div style={{fontFamily:UI,fontSize:13,color:c.t1,lineHeight:1.5,marginBottom:12}}>This device has <b>{blocked.next}</b> {SHRINK_LABEL[blocked.kind]||blocked.kind||"scenes"} but the cloud has <b>{blocked.prior}</b>. To protect the cloud deck, the sync was held instead of overwriting it. Almost always you want to <b>pull the cloud copy</b>. Only force-push if this device is deliberately the new source of truth.</div>
       <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
         <Btn kind="primary" size={12} disabled={!!syncing} onClick={async()=>{setSyncing("pull");try{await pullDeckFromCloud();await store.del("pb:sync_blocked");onToast("Pulled the cloud copy. Reloading…");setTimeout(()=>location.reload(),800);}catch(e){onToast("Pull failed: "+(e.message||""));setSyncing("");}}}><CloudDownload size={15}/>{syncing==="pull"?"Pulling…":"Pull cloud copy (recommended)"}</Btn>
         <Btn kind="danger" size={12} disabled={!!syncing} onClick={async()=>{if(!window.confirm(`Force-push this device's ${blocked.next}-scene deck and OVERWRITE the cloud's ${blocked.prior}-scene deck? A snapshot of the cloud is saved first, so it is reversible from Version history.`))return;setSyncing("force");try{await writeSnapshotNow("before-force-push-"+Date.now(),"Before force push "+todayISO());await forcePushDeck();setBlocked(null);onToast("Forced this device's deck to the cloud.");}catch(e){onToast("Force push failed: "+(e.message||""));}setSyncing("");}}><Upload size={15}/>{syncing==="force"?"Pushing…":"Force push this device"}</Btn>
