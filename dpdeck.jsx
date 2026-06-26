@@ -2155,33 +2155,55 @@ function Capture({project,setProject,onFiled,onToast}){
 
 /* DAYS / TODAY — the schedule as the working unit */
 function dayLocation(scenes,locations){for(const s of scenes){const l=locations.find(x=>x.id===s.locationId);if(l&&l.lat!=null&&l.lat!=="")return l;}return null;}
+// A schedule banner row mirroring the PSS strips: location-block header (ŁÓDŹ / company move),
+// a day-off marker, or an inline production note (ANIMATION/VFX, conditional scene notes).
+function SchedBanner({text,kind}){
+  const blk=kind==="block",off=kind==="off";
+  const I=blk?MapPin:off?MoonStar:AlertTriangle;
+  return <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 12px",borderRadius:8,background:blk?c.accentSoft:c.bg2,border:`1px ${off?"dashed":"solid"} ${blk?c.accent:c.line2}`,fontFamily:UI,fontSize:11.5,fontWeight:blk?800:off?700:600,color:blk?c.accent:off?c.t2:c.t1,letterSpacing:blk?"0.03em":"normal",lineHeight:1.35}}>
+    <I size={13} color={blk?c.accent:c.t2} style={{flexShrink:0}}/><span style={{minWidth:0}}>{text}</span></div>;
+}
 function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
   const loc=dayLocation(scenes,project.locations);
-  const schedPage=(project.days||[]).find(x=>String(x.day)===String(day))?.page||0;  // PDF page for this day, from the embedded schedule
+  const rd=(project.days||[]).find(x=>String(x.day)===String(day))||{};
+  const schedPage=rd.page||0;  // PDF page for this day, from the embedded schedule
+  const move=(rd.locs||[]).length>1;  // more than one shooting location this day = company move
+  const byAfter={};(rd.banners||[]).forEach(b=>{const k=b.after||"";(byAfter[k]=byAfter[k]||[]).push(b.text);});  // inline notes keyed by the scene they follow
+  const dayKeys=new Set(scenes.map(s=>numKey(s.number)));
+  const topB=[];Object.keys(byAfter).forEach(k=>{if(!k||!dayKeys.has(k))topB.push(...byAfter[k]);});  // top-of-day + notes whose anchor scene isn't on this day
   const gear=useMemo(()=>{const map=Object.fromEntries(DEPTS.map(d=>[d.k,new Set()]));scenes.forEach(s=>s.gearTags.forEach(id=>{const g=project.gear.find(x=>x.id===id);if(g&&map[g.dept])map[g.dept].add(g.name);}));return map;},[scenes,project.gear]);
   const hasGear=DEPTS.some(d=>gear[d.k].size);
+  const rows=[];
+  topB.forEach((t,i)=>rows.push(<SchedBanner key={"tb"+i} text={t}/>));
+  scenes.forEach(s=>{const sl=move?(rd.sceneLoc||{})[numKey(s.number)]:"";
+    rows.push(<button key={s.number} onClick={()=>onOpen(s.number)} style={{display:"flex",alignItems:"center",gap:11,padding:"8px 10px",background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,cursor:"pointer",textAlign:"left"}}>
+      <span style={{fontFamily:MONO,fontSize:11,color:c.t2,minWidth:18}}>{s.shootOrder||"—"}</span>
+      <span style={{fontFamily:MONO,fontSize:14,fontWeight:700,color:c.accent,minWidth:34}}>{s.number}</span>
+      <span style={{flex:1,minWidth:0,fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.slug} {s.set} <span style={{color:c.t2,fontFamily:MONO,fontSize:10}}>{s.dayNight}</span></span>
+      {sl&&<span title={sl} style={{fontFamily:MONO,fontSize:9.5,color:c.t2,maxWidth:96,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flexShrink:0,display:"flex",alignItems:"center",gap:2}}><MapPin size={9}/>{sl}</span>}
+      {s.eighths>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2,flexShrink:0}}>{fmtEighths(s.eighths)}</span>}
+      {s.refs.length>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2}}>{s.refs.length}<ImageIcon size={10} style={{verticalAlign:"-1px",marginLeft:2}}/></span>}
+    </button>);
+    (byAfter[numKey(s.number)]||[]).forEach((t,i)=>rows.push(<SchedBanner key={s.number+"nb"+i} text={t}/>));
+  });
   return <div style={{background:c.bg1,border:`1px solid ${today?c.accent:c.line}`,borderRadius:14,overflow:"hidden"}}>
     <div style={{padding:"13px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",background:today?c.accentSoft:"transparent"}}>
       <div style={{display:"flex",alignItems:"baseline",gap:9}}><span style={{fontFamily:UI,fontSize:11,fontWeight:700,color:c.t2,letterSpacing:"0.08em"}}>DAY</span><span style={{fontFamily:MONO,fontSize:22,fontWeight:700,color:c.accent}}>{day}</span></div>
       {today&&<Chip color={c.accent} active>TODAY</Chip>}
       {date&&<Val size={13} style={{color:c.t1}}>{new Date(date+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}</Val>}
+      {rd.sunrise&&<span style={{fontFamily:MONO,fontSize:10.5,color:c.t2,display:"flex",alignItems:"center",gap:3}}><Sunrise size={12} color={c.t2}/>{rd.sunrise}<Sunset size={12} color={c.t2} style={{marginLeft:5}}/>{rd.sunset}</span>}
       <div style={{flex:1}}/>
-      <span style={{fontFamily:MONO,fontSize:12,color:c.t2}}>{scenes.length} {scenes.length===1?"scene":"scenes"}{dayEighths(scenes)?` · ${fmtEighths(dayEighths(scenes))} pg`:""}</span>
+      <span style={{fontFamily:MONO,fontSize:12,color:c.t2}}>{scenes.length} {scenes.length===1?"scene":"scenes"}{(rd.pages||dayEighths(scenes))?` · ${rd.pages||fmtEighths(dayEighths(scenes))} pg`:""}</span>
       {schedPage>0&&openPdf&&<IconBtn icon={BookOpen} size={16} dim title={`Open the schedule PDF at Day ${day}`} onClick={()=>openPdf({slot:"schedule",start:schedPage,title:`Schedule · Day ${day}`})}/>}
     </div>
-    {loc&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`,display:"grid",gridTemplateColumns:"1fr",gap:9}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip><div style={{display:"flex",gap:12,alignItems:"center"}}><WeatherInline lat={loc.lat} lng={loc.lng} date={date}/><TravelChip meta={project.meta} lat={loc.lat} lng={loc.lng}/></div></div>
-      {date&&<SunBar lat={loc.lat} lng={loc.lng} tz={project.meta.tz} date={date}/>}
+    {(rd.loc||loc)&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",flexDirection:"column",gap:9}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap"}}>{rd.loc?<Chip color={c.t1}><MapPin size={11}/>{rd.loc}</Chip>:(loc&&<Chip color={c.t1}><MapPin size={11}/>{loc.name}</Chip>)}{move&&<Chip color={c.accent}><Navigation size={10}/>Company move · {rd.locs.length} locations</Chip>}</div>
+        {loc&&<div style={{display:"flex",gap:12,alignItems:"center"}}><WeatherInline lat={loc.lat} lng={loc.lng} date={date}/><TravelChip meta={project.meta} lat={loc.lat} lng={loc.lng}/></div>}
+      </div>
+      {loc&&date&&<SunBar lat={loc.lat} lng={loc.lng} tz={project.meta.tz} date={date}/>}
     </div>}
-    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:6}}>
-      {scenes.map(s=><button key={s.number} onClick={()=>onOpen(s.number)} style={{display:"flex",alignItems:"center",gap:11,padding:"8px 10px",background:c.bg2,border:`1px solid ${c.line}`,borderRadius:9,cursor:"pointer",textAlign:"left"}}>
-        <span style={{fontFamily:MONO,fontSize:11,color:c.t2,minWidth:18}}>{s.shootOrder||"—"}</span>
-        <span style={{fontFamily:MONO,fontSize:14,fontWeight:700,color:c.accent,minWidth:34}}>{s.number}</span>
-        <span style={{flex:1,minWidth:0,fontFamily:UI,fontSize:13,color:c.t0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.slug} {s.set} <span style={{color:c.t2,fontFamily:MONO,fontSize:10}}>{s.dayNight}</span></span>
-        {s.eighths>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2,flexShrink:0}}>{fmtEighths(s.eighths)}</span>}
-        {s.refs.length>0&&<span style={{fontFamily:MONO,fontSize:10,color:c.t2}}>{s.refs.length}<ImageIcon size={10} style={{verticalAlign:"-1px",marginLeft:2}}/></span>}
-      </button>)}
-    </div>
+    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:6}}>{rows}</div>
     {hasGear&&<div style={{padding:"0 15px 14px"}}><div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}><Label style={{marginBottom:7}}>Gear this day</Label>{DEPTS.map(d=>gear[d.k].size?<div key={d.k} style={{display:"flex",gap:7,marginBottom:5,alignItems:"flex-start"}}><span style={{fontFamily:MONO,fontSize:10,color:c.t2,minWidth:58,paddingTop:3}}>{d.label}</span><div style={{display:"flex",flexWrap:"wrap",gap:5}}>{[...gear[d.k]].map(n=><Chip key={n} small>{n}</Chip>)}</div></div>:null)}</div></div>}
   </div>;
 }
@@ -2254,7 +2276,8 @@ function Days({project,onOpen,openPdf}){
       <div style={{width:200}}><Segmented value={mode} onChange={v=>setMode(v||"list")} options={[{k:"list",label:"List"},{k:"calendar",label:"Calendar"}]}/></div></div>
     {mode==="calendar"?<CalendarView project={project} onOpen={onOpen}/>:<>
       {todayIdx<0&&<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,display:"flex",alignItems:"center",gap:7}}><Clock size={14}/>No shoot day falls on today ({ti}).</div>}
-      {ordered.map(d=><DayCard key={d.day} {...d} project={project} onOpen={onOpen} openPdf={openPdf} today={d.date===ti&&!!ti}/>)}
+      {(()=>{const pn=((project.days||[]).find(x=>String(x.day)==="1")||{}).prodNotes||[];return pn.length?<div style={{display:"flex",flexDirection:"column",gap:6}}><Label>Schedule notes</Label>{pn.map((t,i)=><SchedBanner key={"pn"+i} text={t}/>)}</div>:null;})()}
+      {ordered.map(d=>{const rd=(project.days||[]).find(x=>String(x.day)===String(d.day))||{};return <div key={d.day} style={{display:"flex",flexDirection:"column",gap:8}}>{(rd.offs||[]).map((o,i)=><SchedBanner key={"of"+i} text={o} kind="off"/>)}{rd.block&&<SchedBanner text={rd.block} kind="block"/>}<DayCard {...d} project={project} onOpen={onOpen} openPdf={openPdf} today={d.date===ti&&!!ti}/></div>;})}
       {unsched>0&&<div style={{fontFamily:UI,fontSize:12.5,color:c.t2,textAlign:"center"}}>{unsched} scene{unsched>1?"s":""} not yet on the schedule.</div>}
     </>}
   </div>;
