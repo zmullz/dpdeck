@@ -2169,6 +2169,30 @@ function SchedBanner({text,kind}){
   return <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 12px",borderRadius:8,background:blk?c.accentSoft:c.bg2,border:`1px ${off?"dashed":"solid"} ${blk?c.accent:c.line2}`,fontFamily:UI,fontSize:11.5,fontWeight:blk?800:off?700:600,color:blk?c.accent:off?c.t2:c.t1,letterSpacing:blk?"0.03em":"normal",lineHeight:1.35}}>
     <I size={13} color={blk?c.accent:c.t2} style={{flexShrink:0}}/><span style={{minWidth:0}}>{text}</span></div>;
 }
+function stripDnColor(dn){const u=(dn||"").toUpperCase();return dnColor(u.includes("NIGHT")?"NIGHT":(u.includes("DUSK")||u.includes("EVENING"))?"DUSK":u.includes("DAWN")?"DAWN":"DAY");}
+// One VERBATIM PSS strip, rendered to match the stripboard: Scene# | I/E | exact HEADING | pages,
+// then the description, then D/N · cast · BG · location · flag. Taps through to the scene by number.
+function StripRow({s,project,onOpen}){
+  let sc=(project.scenes||[]).find(x=>numKey(x.number)===numKey(s.n));
+  if(!sc){const base=String(s.n||"").replace(/\s*pt\s*\d+/i,"").trim();if(base)sc=(project.scenes||[]).find(x=>numKey(x.number)===numKey(base));}
+  const tgt=sc?sc.number:null, col=stripDnColor(s.dn);
+  return <button onClick={tgt?()=>onOpen(tgt):undefined} style={{display:"flex",flexDirection:"column",gap:3,padding:"8px 11px",background:c.bg2,border:`1px solid ${c.line}`,borderLeft:`3px solid ${col}`,borderRadius:9,cursor:tgt?"pointer":"default",textAlign:"left",width:"100%"}}>
+    <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+      <span style={{fontFamily:MONO,fontSize:13.5,fontWeight:700,color:c.accent,flexShrink:0}}>{s.n}</span>
+      {s.ie&&<span style={{fontFamily:MONO,fontSize:10,fontWeight:700,color:c.t2,flexShrink:0}}>{s.ie}</span>}
+      <span style={{flex:1,minWidth:0,fontFamily:UI,fontSize:12.5,fontWeight:600,color:c.t0}}>{s.head}</span>
+      {s.pg&&<span style={{fontFamily:MONO,fontSize:11,color:c.t1,flexShrink:0}}>{s.pg}</span>}
+    </div>
+    {s.desc&&<div style={{fontFamily:UI,fontSize:12,color:c.t1,lineHeight:1.35}}>{s.desc}</div>}
+    <div style={{display:"flex",flexWrap:"wrap",gap:9,fontFamily:MONO,fontSize:9.5,color:c.t2,alignItems:"center"}}>
+      {s.dn&&<span style={{color:col,fontWeight:700}}>{s.dn}</span>}
+      {s.cast&&<span>Cast {s.cast}</span>}
+      {s.bg&&<span>BG {s.bg}</span>}
+      {s.loc&&<span style={{display:"flex",alignItems:"center",gap:2}}><MapPin size={9}/>{s.loc}</span>}
+      {s.flag&&<span style={{color:c.animation,fontWeight:600}}>{s.flag}</span>}
+    </div>
+  </button>;
+}
 function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
   const loc=dayLocation(scenes,project.locations);
   const rd=(project.days||[]).find(x=>String(x.day)===String(day))||{};
@@ -2197,6 +2221,9 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
     </button>);
     (byAfter[numKey(s.number)]||[]).forEach((t,i)=>rows.push(<SchedBanner key={s.number+"nb"+i} text={t}/>));
   });
+  // VERBATIM PSS strips (the AD-facing stripboard) — used when present; else fall back to the derived rows (pseudo-days)
+  const stripEls=[];(rd.strips||[]).forEach((it,i)=>{ if(it.t==="b") stripEls.push(<SchedBanner key={"sb"+i} text={it.text}/>); else stripEls.push(<StripRow key={"sr"+i} s={it} project={project} onOpen={onOpen}/>); });
+  const hasStrips=stripEls.length>0, stripCount=(rd.strips||[]).filter(x=>x.t==="s").length;
   return <div style={{background:c.bg1,border:`1px solid ${today?c.accent:c.line}`,borderRadius:14,overflow:"hidden"}}>
     <div style={{padding:"13px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",background:today?c.accentSoft:"transparent"}}>
       <div style={{display:"flex",alignItems:"baseline",gap:9}}><span style={{fontFamily:UI,fontSize:11,fontWeight:700,color:c.t2,letterSpacing:"0.08em"}}>DAY</span><span style={{fontFamily:MONO,fontSize:22,fontWeight:700,color:c.accent}}>{day}</span></div>
@@ -2204,7 +2231,7 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
       {date&&<Val size={13} style={{color:c.t1}}>{new Date(date+"T12:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}</Val>}
       {rd.sunrise&&<span style={{fontFamily:MONO,fontSize:10.5,color:c.t2,display:"flex",alignItems:"center",gap:3}}><Sunrise size={12} color={c.t2}/>{rd.sunrise}<Sunset size={12} color={c.t2} style={{marginLeft:5}}/>{rd.sunset}</span>}
       <div style={{flex:1}}/>
-      <span style={{fontFamily:MONO,fontSize:12,color:c.t2}}>{scenes.length} {scenes.length===1?"scene":"scenes"}{(rd.pages||dayEighths(scenes))?` · ${rd.pages||fmtEighths(dayEighths(scenes))} pg`:""}</span>
+      <span style={{fontFamily:MONO,fontSize:12,color:c.t2}}>{hasStrips?stripCount:scenes.length} {(hasStrips?stripCount:scenes.length)===1?(hasStrips?"strip":"scene"):(hasStrips?"strips":"scenes")}{(rd.pages||dayEighths(scenes))?` · ${rd.pages||fmtEighths(dayEighths(scenes))} pg`:""}</span>
       {schedPage>0&&openPdf&&<IconBtn icon={BookOpen} size={16} dim title={`Open the schedule PDF at Day ${day}`} onClick={()=>openPdf({slot:"schedule",start:schedPage,title:`Schedule · Day ${day}`})}/>}
     </div>
     {(rd.loc||loc)&&<div style={{padding:"11px 15px",borderBottom:`1px solid ${c.line}`,display:"flex",flexDirection:"column",gap:9}}>
@@ -2214,7 +2241,7 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
       </div>
       {sunLoc&&date&&<SunBar lat={sunLoc.lat} lng={sunLoc.lng} tz={project.meta.tz} date={date}/>}
     </div>}
-    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:6}}>{rows}</div>
+    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:6}}>{hasStrips?stripEls:rows}</div>
     {hasGear&&<div style={{padding:"0 15px 14px"}}><div style={{borderTop:`1px solid ${c.line}`,paddingTop:11}}><Label style={{marginBottom:7}}>Gear this day</Label>{DEPTS.map(d=>gear[d.k].size?<div key={d.k} style={{display:"flex",gap:7,marginBottom:5,alignItems:"flex-start"}}><span style={{fontFamily:MONO,fontSize:10,color:c.t2,minWidth:58,paddingTop:3}}>{d.label}</span><div style={{display:"flex",flexWrap:"wrap",gap:5}}>{[...gear[d.k]].map(n=><Chip key={n} small>{n}</Chip>)}</div></div>:null)}</div></div>}
   </div>;
 }
