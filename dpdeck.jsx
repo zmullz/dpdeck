@@ -1902,7 +1902,22 @@ function SceneView({scene,scenes,meta,locations,gearList,wide,patchScene,openInk
     </div>
   </PanelShell>;
 
-  return <div style={{display:"flex",flexDirection:"column",gap:13,height:wide?"100%":"auto",minHeight:0}}>
+  // TOUCH (iPad/iPhone) ONLY: a clear horizontal swipe navigates to the prev/next scene. Excludes inner
+  // horizontal-scroll strips, any open overlay (script reader / send / bg picker), text selection, and
+  // vertical scrolls — so nothing else changes. (Desktop uses a mouse, which never fires touch events.)
+  const swipe=useRef(null);
+  const onSwipeStart=e=>{if(!e.touches||e.touches.length!==1){swipe.current=null;return;}const t=e.touches[0];let el=e.target,scrollable=false;
+    while(el&&el!==e.currentTarget){try{if(el.scrollWidth-el.clientWidth>6){const ov=getComputedStyle(el).overflowX;if(ov==="auto"||ov==="scroll"){scrollable=true;break;}}}catch{}el=el.parentElement;}
+    swipe.current={x:t.clientX,y:t.clientY,scrollable};};
+  const onSwipeEnd=e=>{const s=swipe.current;swipe.current=null;
+    if(!s||s.scrollable||!neighbors||scriptFull||sendImg||pickBg)return;
+    const ch=e.changedTouches&&e.changedTouches[0];if(!ch)return;
+    const dx=ch.clientX-s.x,dy=ch.clientY-s.y;
+    if(Math.abs(dx)<64||Math.abs(dx)<=Math.abs(dy)*1.8)return;
+    try{if(window.getSelection&&String(window.getSelection()))return;}catch{}
+    const tgt=dx<0?neighbors.next:neighbors.prev;   // swipe left → next scene, swipe right → previous scene
+    if(tgt&&goScene)goScene(tgt);};
+  return <div onTouchStart={onSwipeStart} onTouchEnd={onSwipeEnd} style={{display:"flex",flexDirection:"column",gap:13,height:wide?"100%":"auto",minHeight:0}}>
     {wide?DaylightStrip:InfoStrip}
     {scene.animation?.length>0&&<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:c.animationSoft,border:`1px solid ${c.animation}`,borderRadius:11,padding:"9px 14px"}}><Film size={16} color={c.animation}/><span style={{fontFamily:UI,fontSize:13,fontWeight:800,letterSpacing:"0.08em",color:c.animation}}>ANIMATION</span>{[...new Set(scene.animation.map(r=>r&&r.type).filter(Boolean))].map(t=><span key={t} style={{fontFamily:MONO,fontSize:10,fontWeight:600,color:c.animation,background:c.bg1,border:`1px solid ${c.animation}44`,borderRadius:5,padding:"2px 7px"}}>{t}</span>)}</div>}
     {wide?
