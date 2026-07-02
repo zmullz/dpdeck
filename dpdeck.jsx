@@ -260,7 +260,9 @@ async function importFullBackup(obj){
   if(!obj||obj.dpdeckBackup!==1||!obj.data||!obj.data["pb:project"])throw new Error("Not a DP Deck backup file.");
   // Write everything except the project first, then the project LAST — so a mid-import failure
   // (e.g. storage quota) leaves the previous deck intact rather than half-overwritten.
-  for(const [k,v] of Object.entries(obj.data)){if(k==="pb:project")continue;await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}
+  for(const [k,v] of Object.entries(obj.data)){if(k==="pb:project")continue;
+    if(k.indexOf("pb:doc:")===0&&!/name$/.test(k)){try{const old=await store.get(k);if(old!==v)invalidateDoc(k.slice(7));}catch{}}  // a re-imported/synced PDF that changed -> drop the stale in-memory parse so ensureDoc re-reads the new one (no hard reload needed)
+    await store.set(k,v);if(String(k).startsWith("pb:img:"))imgCache.set(k.slice(7),v);}
   await store.set("pb:project",obj.data["pb:project"]);
   await store.set("pb:base_snapshot",obj.data["pb:project"]);   // keep the 3-way merge ancestor in lockstep (restore / backup / pull / merge)
 }
@@ -723,10 +725,11 @@ async function writeDailySnapshot(serialized,ts){
   // per-device, so a stale/partial device must not be able to destroy a good point-in-time snapshot
   // another device wrote earlier today. Belt-and-suspenders for recovery alongside the push-shrink guard.
   try{
-    const incCount=(((JSON.parse(serialized).data||{})["pb:project"]||{}).scenes||[]).length;
+    const score=p=>{p=p||{};let n=(p.scenes||[]).length,h=0;for(const s of p.scenes||[])h+=(s.gearTags||[]).length+(s.shots||[]).length+(s.refs||[]).length;return n*100000+h;};  // scenes dominate; gear/shots/refs break ties so a same-scene-count stale device can't clobber a richer recovery point
+    const incP=(JSON.parse(serialized).data||{})["pb:project"];
     const exRaw=await r2ReadRaw(snapKey(day));
-    if(exRaw){const exCount=(((JSON.parse(exRaw).data||{})["pb:project"]||{}).scenes||[]).length;
-      if(exCount>incCount){await store.set("pb:snap_day",day);return;}}  // keep the bigger existing snapshot
+    if(exRaw){const exP=(JSON.parse(exRaw).data||{})["pb:project"];
+      if(score(exP)>score(incP)){await store.set("pb:snap_day",day);return;}}  // keep the richer existing snapshot
   }catch{}
   await r2Write(snapKey(day),serialized);
   const idx=await readSnapshotIndex();
@@ -863,7 +866,7 @@ function applySchedule(existing,days){
   // first day a scene appears wins its per-scene badge (a scene split across days still lists on each
   // day in the Days view, which reads days[] directly; the badge just shows the primary/first day).
   days.forEach(d=>(d.scenes||[]).forEach((num,i)=>{const k=numKey(num);if(!asn.has(k))asn.set(k,{day:String(d.day||""),order:i+1,date:d.date||""});}));
-  return existing.map(s=>{const a=asn.get(numKey(s.number));return a?{...s,shootDay:a.day,shootOrder:a.order,shootDate:a.date||s.shootDate||""}:{...s,shootDay:"",shootOrder:0,shootDate:""};});  // unscheduled -> clear shootDate too, so sun/weather/time-of-day never compute off a stale day
+  return existing.map(s=>{const a=asn.get(numKey(s.number));return a?{...s,shootDay:a.day,shootOrder:a.order,shootDate:a.date||""}:{...s,shootDay:"",shootOrder:0,shootDate:""};});  // clear shootDate when the assigned day has NO calendar date (e.g. a TBC/pseudo-day), and when unscheduled, so sun/weather/time-of-day never compute off a STALE day
 }
 function diffSchedule(existing,days){
   const asn=new Map();days.forEach(d=>(d.scenes||[]).forEach(num=>asn.set(numKey(num),String(d.day||""))));
@@ -1081,6 +1084,9 @@ async function scriptPageIndex(validNums){
   })();
   return _spiBuilding;
 }
+// Drop the cached parse of a document slot so the NEXT ensureDoc re-reads it from the (freshly-synced)
+// store. Called when a re-imported/synced PDF changes, so other devices don't keep serving the old one.
+function invalidateDoc(slot){try{const d=docs[slot];if(d){d.doc=null;d.name="";d.pageCache&&d.pageCache.clear();}if(slot==="script"){_spi=null;_spiDoc=null;}}catch{}}
 
 /* ---- guess page ranges from text positions (fallback aid) -------- */
 async function scriptPagesText(doc,onProgress){
@@ -2175,7 +2181,7 @@ function Capture({project,setProject,onFiled,onToast}){
 }
 
 /* DAYS / TODAY — the schedule as the working unit */
-function dayLocation(scenes,locations){for(const s of scenes){const l=locations.find(x=>x.id===s.locationId);if(l&&l.lat!=null&&l.lat!=="")return l;}return null;}
+function dayLocation(scenes,locations){for(const s of scenes){const l=locations.find(x=>x.id===s.locationId);if(l&&l.lat!=null&&l.lat!==""&&l.lng!=null&&l.lng!=="")return l;}return null;}// need BOTH lat+lng or the sun/weather would compute at longitude 0 (Greenwich) and show wrong times
 // A schedule banner row mirroring the PSS strips: location-block header (ŁÓDŹ / company move),
 // a day-off marker, or an inline production note (ANIMATION/VFX, conditional scene notes).
 function SchedBanner({text,kind}){
@@ -2217,7 +2223,7 @@ function DayCard({day,date,scenes,project,onOpen,openPdf,today}){
   const addrLoc={};scenes.forEach(s=>{const a=(rd.sceneLoc||{})[numKey(s.number)];if(a&&s.locationId){addrLoc[a]=addrLoc[a]||{};addrLoc[a][s.locationId]=(addrLoc[a][s.locationId]||0)+1;}});
   const locFor=a=>{const m=addrLoc[a];if(!m)return null;const id=Object.keys(m).sort((x,y)=>m[y]-m[x])[0];return (project.locations||[]).find(l=>l.id===id)||null;};
   const primaryL=locFor(rd.loc);
-  const sunLoc=(primaryL&&primaryL.lat!=null&&primaryL.lat!=="")?primaryL:loc;  // weather/sun from the day's primary (address-matched) location when it has GPS, else first scene-with-GPS
+  const sunLoc=(primaryL&&primaryL.lat!=null&&primaryL.lat!==""&&primaryL.lng!=null&&primaryL.lng!=="")?primaryL:loc;  // weather/sun from the day's primary (address-matched) location when it has full GPS, else first scene-with-GPS
   const byAfter={};(rd.banners||[]).forEach(b=>{const k=b.after||"";(byAfter[k]=byAfter[k]||[]).push(b.text);});  // inline notes keyed by the scene they follow
   const dayKeys=new Set(scenes.map(s=>numKey(s.number)));
   const topB=[];Object.keys(byAfter).forEach(k=>{if(!k||!dayKeys.has(k))topB.push(...byAfter[k]);});  // top-of-day + notes whose anchor scene isn't on this day
@@ -3256,7 +3262,7 @@ function SettingsView({project,setProject,onToast,onThemeChange,onNav}){
       </div>
       <div style={{fontFamily:MONO,fontSize:10.5,color:c.t2,marginBottom:14}}>{lastBk?`Last download backup: ${new Date(lastBk).toLocaleDateString()}`:"No download backup taken yet."}{R2_KEY?" · cloud snapshots: on":" · cloud snapshots: off"}</div>
       {!wipe?<Btn kind="danger" size={12} onClick={()=>setWipe(true)}><Trash2 size={15}/>Erase everything</Btn>:
-        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:animation","pb:doc:scriptname","pb:doc:schedulename","pb:doc:animationname","pb:doccache:animation","pb:snap_day"])await store.del(k);try{localStorage.removeItem(LS_MIRROR);}catch{}location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
+        <div style={{display:"flex",gap:9,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:UI,fontSize:13,color:c.danger,maxWidth:340,lineHeight:1.4}}>{R2_KEY?"Erase this device's deck? A snapshot is saved to your cloud first, so you can roll it back from Version history.":"Erase all scenes, prep, and media on this device? There's no cloud snapshot to roll back to. Turn on Cloud sync first to be safe."}</span><Btn kind="danger" size={12} onClick={async()=>{try{if(R2_KEY)await writeSnapshotNow("before-erase-"+Date.now(),"Before erase "+todayISO());}catch{}for(const k of ["pb:project","pb:base_snapshot","pb:synced_ts","pb:project_mtime","pb:scriptpdf","pb:scriptpdfname","pb:doc:script","pb:doc:schedule","pb:doc:animation","pb:doc:scriptname","pb:doc:schedulename","pb:doc:animationname","pb:doccache:script","pb:doccache:schedule","pb:doccache:animation","pb:snap_day","pb:sync_blocked"])await store.del(k);try{localStorage.removeItem(LS_MIRROR);}catch{}location.reload();}}>Yes, erase</Btn><Btn kind="ghost" size={12} onClick={()=>setWipe(false)}>Cancel</Btn></div>}
     </Card>
     <div style={{textAlign:"center",fontFamily:MONO,fontSize:10.5,color:c.t2,padding:"4px 0 12px"}}>DP DECK · prep + shoot · one film</div>
   </div>;
@@ -3530,7 +3536,7 @@ function SidesDoc({project,dayFilter}){
             <span style={{fontFamily:MONO,fontSize:12,color:P.muted}}>{scenes.length} scene{scenes.length===1?"":"s"}{eighths?` · ${fmtEighths(eighths)} pg`:""}</span>
           </div>
           <div style={{fontFamily:UI,fontSize:11.5,color:P.muted,marginTop:5}}>{m.title||"Untitled Film"}{dloc?` · ${dloc.name}`:""}</div>
-          {dloc&&dloc.lat!=null&&dloc.lat!==""&&day.date&&<div style={{marginTop:6}}>
+          {dloc&&dloc.lat!=null&&dloc.lat!==""&&dloc.lng!=null&&dloc.lng!==""&&day.date&&<div style={{marginTop:6}}>
             <div style={{fontFamily:UI,fontSize:11.5,color:P.text}}><b>Weather:</b> <PrintWeather lat={dloc.lat} lng={dloc.lng} date={day.date}/></div>
             <SidesSun lat={dloc.lat} lng={dloc.lng} tz={m.tz} date={day.date}/>
           </div>}
